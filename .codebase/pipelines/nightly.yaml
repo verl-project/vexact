@@ -8,7 +8,7 @@ trigger:
 jobs:
   batch_invariant_ops_nightly:
     name: batch-invariant-ops-nightly
-    image: aliyun-sin-hub.byted.org/codebase/ci_python_39
+    image: ${{CI_IMAGE_ADDR}}
     runs-on:
       env: i18n
     steps:
@@ -18,6 +18,7 @@ jobs:
           job_def_name: "vexact_nightly"
           region: "i18n"
           wait_result_timeout: 1800
+          # Ensure that developers who are not in mlsys team can still run nightly jobs.
           use_merlin_resource_account: true
           entrypoint: |
             . ci/nightly.sh
