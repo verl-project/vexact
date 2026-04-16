@@ -41,6 +41,74 @@ source = ["vexact"]
 [tool.coverage.report]
 ignore_errors = true
 
+# -------------------------------
+# tool.ruff - Linting configuration
+# -------------------------------
+[tool.ruff]
+target-version = "py312"
+indent-width = 4
+# Note: While the formatter will attempt to format lines such that they remain within the line-length,
+# it isn't a hard upper bound, and formatted lines may exceed the line-length.
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # isort
+    "I",
+    "G",
+]
+
+ignore = [
+    # star imports
+    "F405", "F403",
+    # lambda expression assignment
+    "E731",
+    # Loop control variable not used within loop body
+    "B007",
+    # f-string format
+    "UP032",
+    # `.log()` statement uses f-string
+    "G004",
+    # X | None for type annotations
+    "UP045",
+    # Union[X, Y] -> X | Y
+    "UP007",
+    # deprecated import
+    "UP035",
+    # `zip()` without an explicit `strict=` parameter
+    "B905",
+    # Class inherits from both `str` and `enum.Enum` -> suggests StrEnum, which has different __str__ semantics
+    "UP042",
+]
+
+extend-unsafe-fixes = [
+  # F401 auto fixes might remove imports that perform side effects like register logic.
+  # So set as unsafe fix to promote manual fixes.
+  "F401",
+]
+
+[tool.ruff.lint.isort]
+lines-after-imports = 2
+
+known-first-party = [
+  "verl",
+  "vexact",
+]
+
+known-third-party = [
+  "torch",
+  "transformers",
+  "wandb",
+]
+
 [tool.uv.sources]
 # verl = { git = "https://github.com/volcengine/verl.git", tag = "v0.7.1" }
 verl = { path = "./verl", editable = true }  # if you want to clone it and run locally for dev
