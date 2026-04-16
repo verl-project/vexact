@@ -1,0 +1,68 @@
+[project]
+name = "vexact"
+version = "0.1.0"
+description = "TODO"
+requires-python = ">=3.12, <3.13"
+dependencies = [
+    "verl",
+    "transformers",
+    "torch_memory_saver==0.0.9; platform_machine != 'aarch64'",
+    "pyzmq>=27.1.0",
+    "msgspec",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "torch==2.10.0+cu129",
+    "torchvision",
+    "torchaudio",
+    "flash-attn",
+    "flash-attn-3",
+    "flash-attn-4>=4.0.0b9"
+]
+dev = [
+    "pytest",
+    "pre-commit"
+]
+vllm = [
+    "vllm==0.17.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["vexact"]
+
+[tool.coverage.run]
+source = ["vexact"]
+
+[tool.coverage.report]
+ignore_errors = true
+
+[tool.uv.sources]
+# verl = { git = "https://github.com/volcengine/verl.git", tag = "v0.7.1" }
+verl = { path = "./verl", editable = true }  # if you want to clone it and run locally for dev
+torch = [
+    { index = "pytorch", extra = "gpu" },
+]
+torchvision = { index = "pytorch" }
+torchaudio = { index = "pytorch" }
+flash-attn = { url = "https://github.com/Luosuu/flash-attention3-wheels/releases/download/v0.0.2/flash_attn-2.8.4+cu129torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
+flash-attn-3 = { url = "https://github.com/windreamer/flash-attention3-wheels/releases/download/2026.03.16-4d76052/flash_attn_3-3.0.0+20260316.cu129torch2100cxx11abitrue.71bf77-cp39-abi3-linux_x86_64.whl" }
+# flash-attn-4 = { url = "" }
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+
+[tool.uv]
+required-version = "==0.9.8"
+# extra-build-variables = { flash-attn = { FLASH_ATTENTION_FORCE_BUILD = "TRUE", MAX_JOBS = "16" } }
+no-build-isolation-package = ["flash-attn"]
+environments = ["sys_platform == 'linux'"]
+override-dependencies = [
+    "opencv-python-headless<4.13.0",
+]

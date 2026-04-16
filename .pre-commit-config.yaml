@@ -1,0 +1,56 @@
+repos:
+  # Ensure that uv.lock is up to date with changes in pyproject.toml.
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    # IMPORTANT: sync this version with the uv version locked in pyproject.toml.
+    rev: 0.9.8
+    hooks:
+      # Ensure that uv.lock is up to date with changes in pyproject.toml.
+      - id: uv-lock
+        args: ["--locked"]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # Simply check whether files parse as valid python.
+      - id: check-ast
+      # No files larger than 25MB can be checked in.
+      - id: check-added-large-files
+        args: ["--maxkb=25000"]
+      # No merge conflict
+      - id: check-merge-conflict
+      # Check for debugger imports and py37+ breakpoint() calls in python source.
+      - id: debug-statements
+      # # No commit to master branch.
+      # - id: no-commit-to-branch
+      #   args: ["--branch", "master"]
+      # Makes sure files end in a newline and only a newline.
+      - id: end-of-file-fixer
+      # Trims trailing whitespace.
+      - id: trailing-whitespace
+
+  # Markdown formatter via mdformat.
+  - repo: https://github.com/hukkin/mdformat
+    rev: 1.0.0
+    hooks:
+      - id: mdformat
+        additional_dependencies:
+          - mdformat-gfm
+          - mdformat-mkdocs
+          # Prevent mdformat from forcing --- into 70 _ which breaks the SKILL.md format.
+          - mdformat-simple-breaks
+
+  # Python linter and formatter via ruff.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: "v0.14.4"
+    hooks:
+      - id: ruff-check
+        args: ["--fix", "--show-fixes", "--output-format=full"]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: check-license
+        name: Check license
+        entry: python3 scripts/check_license.py --directories vexact tests scripts
+        language: python
+        pass_filenames: false

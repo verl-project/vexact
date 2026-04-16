@@ -1,0 +1,81 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+.python-version
+.claude
+
+# PyTorch & ML
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.onnx
+*.pb
+checkpoints/
+runs/
+lightning_logs/
+wandb/
+mlruns/
+*.hatchet
+
+# Large datasets and model files
+datasets/
+pretrained/
+*.h5
+*.hdf5
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# Logs
+*.log
+logs/
+
+# Environment variables
+.env
+.env.local
+
+# vexact tests
+verl
+inference_outputs*
