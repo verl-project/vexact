@@ -28,6 +28,7 @@ allowed_modules = [
     "doc",
     "test",
     "deps",
+    "misc",
 ]
 allowed_types = ["feat", "fix", "refactor", "chore", "test"]
 
