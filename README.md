@@ -4,7 +4,7 @@ Transformer-based bitwise-aligned rollout for FSDP with VeRL integration.
 
 ## Key Features
 
-- 🎯 **Bitwise-aligned training & inference** — FSDP/VeOmni actor and rollout engine produce identical logprobs for dense and MoE models with verl
+- 🎯 **Bitwise-aligned training & inference** — VeOmni FSDP actor and VeXact rollout engine produce identical logprobs for dense and MoE models with verl (the legacy FSDP engine is not supported)
 - ⚡ **Fast and aligned kernels** — Fused MoE, fused linear cross-entropy, Flash Attention with paged KV cache, all numerically consistent between training and inference
 - 🧩 **Simple model definitions** — Transformer model code is self-contained and easy to audit, so training and inference model definitions stay in sync
 - 📖 **Readable codebase** — Clean implementation with chunked prefill, pipeline parallelism, and CUDA graph support
@@ -17,14 +17,6 @@ pip install -e ".[gpu]"
 
 # uv
 uv sync --extra gpu
-```
-
-## Model Download
-
-```bash
-huggingface-cli download --resume-download Qwen/Qwen3-1.7B \
-  --local-dir ~/huggingface/Qwen3-1.7B/ \
-  --local-dir-use-symlinks False
 ```
 
 ## Quick Start
