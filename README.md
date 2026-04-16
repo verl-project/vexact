@@ -75,6 +75,10 @@ python3 -m verl.trainer.main_ppo \
 
 See `examples/` for complete recipes (dense and MoE).
 
+## Components
+
+- [`vexact/batch_invariant_ops/`](vexact/batch_invariant_ops/README.md) — batch-invariant operators/kernels for true on-policy RL training.
+
 ## Contribution Guide
 
 See [contributions guide](CONTRIBUTING.md).
