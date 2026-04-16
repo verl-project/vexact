@@ -1,6 +1,6 @@
 name: Nightly batch_invariant_ops tests on Merlin GPU
 trigger:
-  # NOTE: cron schedule is set in the Codebase UI, not this file.
+  # NOTE: cron schedule is defined in UI, not set in this file.
   cron:
     notification:
       when: [success, failure]
@@ -18,7 +18,6 @@ jobs:
           job_def_name: "vexact_nightly"
           region: "i18n"
           wait_result_timeout: 1800
-          # Ensure that developers who are not in mlsys team can still run nightly jobs.
           use_merlin_resource_account: true
           entrypoint: |
             . ci/nightly.sh

@@ -1,7 +1,6 @@
 #!/bin/bash
 
-# This script is triggered by .codebase/pipelines/nightly.yaml via the Merlin
-# `vexact_nightly` Arnold job template.
+# This script is triggered by .codebase/pipelines/nightly.yaml
 
 set -ex
 
@@ -21,4 +20,3 @@ nvidia-smi
 uv sync --frozen --extra gpu --extra dev
 
 uv run pytest -s --cov=vexact tests/batch_invariant_ops/
-uv run coverage report
