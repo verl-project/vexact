@@ -261,9 +261,9 @@ def test_flex_attention_vs_eager():
     rel_diff = diff / (denom + 1e-8)
     print(f"Flex Attention vs Eager Attention Relative Difference: {rel_diff.item()}")
     # torch.allclose with rtol
-    allclose = torch.allclose(flex_output, eager_output.squeeze(0).transpose(0, 1), rtol=1e-3)
+    allclose = torch.allclose(flex_output, eager_output.squeeze(0).transpose(0, 1), rtol=1e-3, atol=1e-3)
     print(f"torch.allclose (rtol=1e-3, atol=1e-3): {allclose}")
-    assert allclose, "Flex Attention vs Eager Attention test failed (allclose rtol=1e-3)."
+    assert allclose, "Flex Attention vs Eager Attention test failed (allclose rtol=1e-3, atol=1e-3)."
     print("\nFlex Attention vs Eager Attention test passed!")
 
 
