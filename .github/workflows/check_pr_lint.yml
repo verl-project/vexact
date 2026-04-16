@@ -1,0 +1,33 @@
+name: Check PR Code Format
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  check_pr_lint:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: .
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff format and check
+        run: |
+          pwd && ls -la
+          ruff check tests vexact scripts
+          ruff format --check tests vexact scripts

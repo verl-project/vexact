@@ -64,28 +64,17 @@ def add_license(path: Path, content: str) -> None:
     insert_at = 0
     for i, line in enumerate(lines):
         stripped = line.strip()
-        if (
-            stripped.startswith("#!")
-            or stripped.startswith("# -*-")
-            or stripped.startswith("# coding")
-        ):
+        if stripped.startswith("#!") or stripped.startswith("# -*-") or stripped.startswith("# coding"):
             insert_at = i + 1
         else:
             break
-    new_content = (
-        "".join(lines[:insert_at])
-        + LICENSE_TEMPLATE
-        + "\n"
-        + "".join(lines[insert_at:])
-    )
+    new_content = "".join(lines[:insert_at]) + LICENSE_TEMPLATE + "\n" + "".join(lines[insert_at:])
     path.write_text(new_content, encoding="utf-8")
     print(f"  [added]   {path}")
 
 
 if __name__ == "__main__":
-    parser = ArgumentParser(
-        description="Check and optionally add license headers to Python files."
-    )
+    parser = ArgumentParser(description="Check and optionally add license headers to Python files.")
     parser.add_argument(
         "--directories",
         "-d",
@@ -102,9 +91,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    pathlist = sorted(
-        set(path for path_arg in args.directories for path in get_py_files(path_arg))
-    )
+    pathlist = sorted(set(path for path_arg in args.directories for path in get_py_files(path_arg)))
 
     missing = []
     for path in pathlist:
@@ -120,9 +107,7 @@ if __name__ == "__main__":
         if args.add:
             print(f"\nAdded license header to {len(missing)} file(s).")
         else:
-            print(
-                f"\n{len(missing)} file(s) are missing a license header. Re-run with --add to fix."
-            )
+            print(f"\n{len(missing)} file(s) are missing a license header. Re-run with --add to fix.")
             raise SystemExit(1)
     else:
         print("All files have a license header.")
