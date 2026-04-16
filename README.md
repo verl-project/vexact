@@ -77,10 +77,8 @@ See [contributions guide](CONTRIBUTING.md).
 
 ## Acknowledgements
 
-VeXact builds on and is inspired by the following projects:
+Besides VeRL and VeOmni, VeXact builds on and is inspired by the following projects:
 
-- [vLLM](https://github.com/vllm-project/vllm) — high-throughput LLM inference engine
-- [batch_invariant_ops](https://github.com/thinking-machines-lab/batch_invariant_ops) — batch-invariant operators for deterministic inference
-- [verl](https://github.com/volcengine/verl) — RL training framework for LLMs
-- [VeOmni](https://github.com/ByteDance-Seed/VeOmni) — training framework with FSDP actor
-- [slime](https://github.com/THUDM/slime) — RL post-training framework
+- [vLLM](https://github.com/vllm-project/vllm) — We refer to vLLM model runner-v2 design and reuse its sampler.
+- [batch_invariant_ops](https://github.com/thinking-machines-lab/batch_invariant_ops) — Batch-invariant operators for deterministic inference
+- [slime](https://github.com/THUDM/slime) — We refer to its work on determnistic chunked prefill. 
