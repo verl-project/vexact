@@ -19,18 +19,15 @@ import re
 pr_title = os.environ.get("PR_TITLE", "").strip()
 
 allowed_modules = [
-    "ops",
-    "kernel",
-    "attention",
-    "moe",
     "model",
-    "inference",
+    "ops",
     "parallel",
+    "integration",
+    "runtime",
     "ci",
-    "docs",
-    "tests",
+    "doc",
+    "test",
     "deps",
-    "misc",
 ]
 allowed_types = ["feat", "fix", "refactor", "chore", "test"]
 
