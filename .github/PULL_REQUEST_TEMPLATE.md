@@ -5,6 +5,8 @@
 ### Checklist Before Starting
 
 - Search for relative PRs/issues and link here: ...
+- PR title follows `[{modules}] {type}: {description}` format (see [check_pr_title.py](../scripts/ci/check_pr_title.py) for the full list of allowed modules and types)
+  - Breaking changes: prepend `[BREAKING]` — e.g. `[BREAKING][ops] feat: new batch-invariant matmul API`
 
 ### Test
 

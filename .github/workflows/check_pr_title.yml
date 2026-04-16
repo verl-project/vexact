@@ -1,0 +1,23 @@
+name: Check PR Title Format
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  check_pr_title:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run PR title checker
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: python3 scripts/ci/check_pr_title.py
