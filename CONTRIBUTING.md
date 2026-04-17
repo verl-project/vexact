@@ -1,6 +1,6 @@
-# Contributing to VExact
+# Contributing to VeXact
 
-Thank you for your interest in contributing to VExact! We welcome bug fixes, new features, documentation improvements, and feedback.
+Thank you for your interest in contributing to VeXact! We welcome bug fixes, new features, documentation improvements, and feedback.
 
 Ways to contribute:
 
@@ -76,4 +76,4 @@ Key invariants to preserve:
 
 ## Thank You
 
-Your contributions help make VExact a more reliable and capable tool. Happy coding!
+Your contributions help make VeXact a more reliable and capable tool. Happy coding!
