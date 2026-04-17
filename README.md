@@ -26,10 +26,10 @@ uv sync --extra gpu
 ```python
 import asyncio
 from vexact.config import ModelConfig, VeXactConfig
-from vexact.vexact import VExact
+from vexact.vexact import VeXact
 from vexact.request import DriverRequest, GenerationConfig
 
-engine = VExact(VeXactConfig(model=ModelConfig(model_path="/path/to/model")))
+engine = VeXact(VeXactConfig(model=ModelConfig(model_path="/path/to/model")))
 
 prompt_ids = engine.tokenizer.encode("Hello, veXact!")
 result = asyncio.run(engine.generate(DriverRequest(
