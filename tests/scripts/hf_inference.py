@@ -407,7 +407,7 @@ def run_continuous_batching(args, tokenizer, generation_config):
     logger.info("=" * 60)
 
     os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = "8576"
+    os.environ.setdefault("MASTER_PORT", "8576")
 
     processes: list[subprocess.Popen] = []
     # spawn other pp rank as subprocesses
