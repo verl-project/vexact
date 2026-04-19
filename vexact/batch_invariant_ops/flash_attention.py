@@ -138,7 +138,7 @@ def flash_attention_forward(
     # Fallback for callers that haven't precomputed max_seqlen_q
     # max_seqlen_q = int((query_start_loc[1:] - query_start_loc[:-1]).max().item())
     # max_seqlen_k = context_lens.max().item()
-    from vexact.device import DEVICE_MAJOR
+    from vexact.utils.device import DEVICE_MAJOR
 
     if use_cute:
         assert DEVICE_MAJOR >= 9, f"FA4 (flash_attn.cute) requires SM90+, got SM{DEVICE_MAJOR}0"

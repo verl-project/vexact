@@ -467,7 +467,7 @@ def fused_moe_forward(
 ):
     routing_weights = routing_weights.bfloat16()
     hidden_states = hidden_states.bfloat16()
-    from vexact.device import DEVICE_MAJOR
+    from vexact.utils.device import DEVICE_MAJOR
 
     if DEVICE_MAJOR == 9:
         expert_fn = FusedMoeExpertFunction
