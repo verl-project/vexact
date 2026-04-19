@@ -39,7 +39,7 @@ class PPMessager:
             os.environ.setdefault("MASTER_ADDR", parallel_config.torch_distributed_addr)
             os.environ.setdefault("MASTER_PORT", parallel_config.torch_distributed_port)
             torch.distributed.init_process_group(
-                backend="nccl", rank=pp_info.pp_rank, world_size=pp_info.pp_size, timeout=timedelta(days=7)
+                backend="nccl", rank=pp_info.pp_rank, world_size=pp_info.pp_size, timeout=timedelta(minutes=30)
             )
             # When we initialize our own process group, pp_rank == world_rank
             self._init_pp_groups_standalone(pp_info)
