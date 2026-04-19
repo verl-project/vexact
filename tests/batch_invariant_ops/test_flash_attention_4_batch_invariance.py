@@ -21,7 +21,7 @@ import torch
 try:
     from flash_attn.cute import flash_attn_varlen_func
 
-    from vexact.device import DEVICE_MAJOR
+    from vexact.utils.device import DEVICE_MAJOR
 
     FA4_AVAILABLE = True if DEVICE_MAJOR == 10 else False
 except ImportError:
