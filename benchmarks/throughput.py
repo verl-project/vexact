@@ -46,11 +46,12 @@ def build_vexact_engine(
     profiler_output: str | None = None,
     profiler_delay_iterations: int = 0,
     profiler_max_iterations: int = 0,
+    attn_impl: str = "fa-invariant",
 ):
     config = VeXactConfig(
         model=ModelConfig(
             model_path=model_path,
-            attn_impl="fa-invariant",
+            attn_impl=attn_impl,
             enable_batch_invariant=True,
             enable_memory_saver=False,
             enforce_eager=False,
@@ -223,6 +224,12 @@ def _parse_args():
         help="Python logging level (e.g., DEBUG, INFO, WARNING).",
     )
     parser.add_argument(
+        "--attn-impl",
+        choices=["fa-invariant", "fa-invariant-cute", "flex"],
+        default="fa-invariant",
+        help="Attention implementation (default: fa-invariant, i.e. flash attn).",
+    )
+    parser.add_argument(
         "--profile-backend",
         choices=["torch", "proton"],
         default=None,
@@ -264,6 +271,7 @@ def main():
         profiler_output=args.profile_output,
         profiler_delay_iterations=args.profile_delay_iterations,
         profiler_max_iterations=args.profile_max_iterations,
+        attn_impl=args.attn_impl,
     )
     try:
         total_prompt_tokens, total_output_tokens, latencies, errors, completed, total_time = run_throughput(
