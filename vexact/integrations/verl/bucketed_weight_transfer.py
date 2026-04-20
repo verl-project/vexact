@@ -257,7 +257,7 @@ class BucketedWeightReceiver:
 
                         # Initialize chunk buffer
                         if name not in chunk_buffers:
-                            total_size = shape.numel() * dtype.itemsize
+                            total_size = shape.numel() * torch.tensor([], dtype=dtype).element_size()
                             chunk_buffers[name] = {
                                 "data": torch.empty(total_size, dtype=torch.uint8, device=self.device),
                                 "shape": shape,
