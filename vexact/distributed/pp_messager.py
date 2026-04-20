@@ -50,7 +50,7 @@ class PPMessager:
             self._init_pp_groups_within_world(pp_info)
 
     def _init_pp_groups_standalone(self, pp_info: PPInfo):
-        """Initialize PP groups when VExact owns the process group (pp_rank == world_rank).
+        """Initialize PP groups when VeXact owns the process group (pp_rank == world_rank).
 
         Creates a ring topology where each rank communicates with its neighbors:
 

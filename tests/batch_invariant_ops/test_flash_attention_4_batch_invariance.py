@@ -19,15 +19,13 @@ import torch
 
 
 try:
-    from flash_attn.cute import flash_attn_varlen_func
+    from flash_attn.cute import flash_attn_varlen_func  # noqa: F401
 
-    from vexact.utils.device import DEVICE_MAJOR
-
-    FA4_AVAILABLE = True if DEVICE_MAJOR == 10 else False
+    FA4_AVAILABLE = True
 except ImportError:
     FA4_AVAILABLE = False
 
-pytestmark = pytest.mark.skipif(not FA4_AVAILABLE, reason="flash_attn.cute (FA4) not available or not on Blackwell GPU")
+pytestmark = pytest.mark.skipif(not FA4_AVAILABLE, reason="flash_attn.cute (FA4) not available")
 
 torch.set_default_device("cuda")
 
