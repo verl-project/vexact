@@ -2,16 +2,13 @@
 
 Throughput benchmarks for the VeXact inference engine on the ShareGPT dataset.
 
-> **Note:** VeXact currently supports text-only input. `DriverRequest` only
-> carries `input_ids_list`, so even when `--include-multimodal` is set, the
-> image/video payloads attached to samples are not forwarded to the engine —
-> only the prompt text is tokenized and sent.
+> **Note:** VeXact currently supports text-only input.
 
 ## Layout
 
 ```
 benchmarks/
-├── dataset.py      # ShareGPT loader (text + image/video), adapted from vLLM
+├── dataset.py      # ShareGPT loader
 ├── throughput.py   # Concurrent asyncio throughput benchmark
 └── README.md
 ```
@@ -45,8 +42,6 @@ tokens/s, and avg / P50 / P95 latency.
 ### Quick start
 
 ```bash
-source /mlx_devbox/users/neiwen.ling/playground/modelchef/.venv/bin/activate
-
 python benchmarks/throughput.py \
     --model-path  /path/to/model \
     --dataset-path /path/to/ShareGPT_V3_unfiltered.json \
@@ -70,8 +65,7 @@ Valid values: `fa-invariant` (default), `fa-invariant-cute`, `flex`.
 
 > **Note:** flex attention is currently incompatible with CUDA graph. When
 > running with `--attn-impl flex`, edit `build_vexact_engine` in
-> `throughput.py` to set `enforce_eager=True` on `ModelConfig`, otherwise the
-> run will fail.
+> `throughput.py` to set `enforce_eager=True`
 
 ### Arguments
 
