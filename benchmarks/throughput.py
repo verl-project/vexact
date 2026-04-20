@@ -26,7 +26,7 @@ from tqdm.asyncio import tqdm_asyncio
 # os.environ["VEXACT_LOGGING_LEVEL"] = "DEBUG"
 from vexact.config import DriverConfig, ModelConfig, ParallelConfig, ProfilerConfig, SchedulerConfig, VeXactConfig
 from vexact.core.request import DriverRequest, GenerationConfig
-from vexact.engine import VExact
+from vexact.engine import VeXact
 
 
 BENCHMARKS_DIR = Path(__file__).resolve().parent
@@ -77,7 +77,7 @@ def build_vexact_engine(
             max_queue_size=0,  # unlimited
         ),
     )
-    return VExact(config)
+    return VeXact(config)
 
 
 def _load_sharegpt_samples(
