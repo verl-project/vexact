@@ -116,10 +116,11 @@ def test_basic_transfer_with_verification():
     print("=== Test: Basic Transfer with Verification ===\n")
 
     zmq_handle = "ipc:///tmp/test_weights_verify.sock"
-    checksums_queue = mp.Queue()
+    ctx = mp.get_context("spawn")
+    checksums_queue = ctx.Queue()
 
-    sender_proc = mp.Process(target=sender_process, args=(zmq_handle, checksums_queue))
-    receiver_proc = mp.Process(target=receiver_process, args=(zmq_handle, checksums_queue))
+    sender_proc = ctx.Process(target=sender_process, args=(zmq_handle, checksums_queue))
+    receiver_proc = ctx.Process(target=receiver_process, args=(zmq_handle, checksums_queue))
 
     receiver_proc.start()
     sender_proc.start()
@@ -133,61 +134,64 @@ def test_basic_transfer_with_verification():
     print("\n" + "=" * 50 + "\n")
 
 
+def sender_chunking(zmq_handle: str, checksums_queue: mp.Queue):
+    # Create 256MB tensor that requires chunking with 64MB bucket
+    torch.manual_seed(123)
+    large_tensor = torch.randn(8192, 8192, dtype=torch.bfloat16, device="cuda:0")
+    checksum = (large_tensor.sum().item(), large_tensor.shape, large_tensor.dtype)
+
+    print(f"[Sender] Sending large tensor: {large_tensor.shape} ({large_tensor.nbytes / (1024**2):.1f} MB)")
+    print(f"  Checksum: sum={checksum[0]:.4f}")
+
+    sender = BucketedWeightSender(zmq_handle, bucket_size_mb=64)  # Small bucket forces chunking
+
+    def weight_gen():
+        yield "large_embedding", large_tensor
+
+    sender.send_weights(weight_gen())
+    checksums_queue.put({"large_embedding": checksum})
+
+
+def receiver_chunking(zmq_handle: str, checksums_queue: mp.Queue):
+    time.sleep(0.5)
+
+    print("[Receiver] Receiving chunked tensor...")
+    receiver = BucketedWeightReceiver(zmq_handle)
+    received_tensor = None
+
+    def on_bucket(weights):
+        nonlocal received_tensor
+        for _, tensor in weights:
+            received_tensor = tensor
+
+    receiver.receive_weights(on_bucket)
+
+    expected_checksums = checksums_queue.get()
+    expected_sum, expected_shape, expected_dtype = expected_checksums["large_embedding"]
+    actual_sum = received_tensor.sum().item()
+
+    print(f"[Receiver] Received: {received_tensor.shape} ({received_tensor.nbytes / (1024**2):.1f} MB)")
+    print("\n[Verification]")
+    print(f"  Shape: {received_tensor.shape} == {expected_shape}: {received_tensor.shape == expected_shape}")
+    print(f"  Dtype: {received_tensor.dtype} == {expected_dtype}: {received_tensor.dtype == expected_dtype}")
+    print(f"  Sum: {actual_sum:.4f} vs {expected_sum:.4f}, diff={abs(actual_sum - expected_sum):.6f}")
+
+    if abs(actual_sum - expected_sum) > 1e-3:
+        raise AssertionError("Chunked tensor verification failed")
+
+    print("\n✓ Chunked tensor verified successfully!")
+
+
 def test_chunking():
     """Test automatic chunking for large tensors."""
     print("=== Test: Chunking Large Tensors ===\n")
 
-    def sender_chunking(zmq_handle: str, checksums_queue: mp.Queue):
-        # Create 256MB tensor that requires chunking with 64MB bucket
-        torch.manual_seed(123)
-        large_tensor = torch.randn(8192, 8192, dtype=torch.bfloat16, device="cuda:0")
-        checksum = (large_tensor.sum().item(), large_tensor.shape, large_tensor.dtype)
-
-        print(f"[Sender] Sending large tensor: {large_tensor.shape} ({large_tensor.nbytes / (1024**2):.1f} MB)")
-        print(f"  Checksum: sum={checksum[0]:.4f}")
-
-        sender = BucketedWeightSender(zmq_handle, bucket_size_mb=64)  # Small bucket forces chunking
-
-        def weight_gen():
-            yield "large_embedding", large_tensor
-
-        sender.send_weights(weight_gen())
-        checksums_queue.put({"large_embedding": checksum})
-
-    def receiver_chunking(zmq_handle: str, checksums_queue: mp.Queue):
-        time.sleep(0.5)
-
-        print("[Receiver] Receiving chunked tensor...")
-        receiver = BucketedWeightReceiver(zmq_handle)
-        received_tensor = None
-
-        def on_bucket(weights):
-            nonlocal received_tensor
-            for _, tensor in weights:
-                received_tensor = tensor
-
-        receiver.receive_weights(on_bucket)
-
-        expected_checksums = checksums_queue.get()
-        expected_sum, expected_shape, expected_dtype = expected_checksums["large_embedding"]
-        actual_sum = received_tensor.sum().item()
-
-        print(f"[Receiver] Received: {received_tensor.shape} ({received_tensor.nbytes / (1024**2):.1f} MB)")
-        print("\n[Verification]")
-        print(f"  Shape: {received_tensor.shape} == {expected_shape}: {received_tensor.shape == expected_shape}")
-        print(f"  Dtype: {received_tensor.dtype} == {expected_dtype}: {received_tensor.dtype == expected_dtype}")
-        print(f"  Sum: {actual_sum:.4f} vs {expected_sum:.4f}, diff={abs(actual_sum - expected_sum):.6f}")
-
-        if abs(actual_sum - expected_sum) > 1e-3:
-            raise AssertionError("Chunked tensor verification failed")
-
-        print("\n✓ Chunked tensor verified successfully!")
-
     zmq_handle = "ipc:///tmp/test_chunking_verify.sock"
-    checksums_queue = mp.Queue()
+    ctx = mp.get_context("spawn")
+    checksums_queue = ctx.Queue()
 
-    sender_proc = mp.Process(target=sender_chunking, args=(zmq_handle, checksums_queue))
-    receiver_proc = mp.Process(target=receiver_chunking, args=(zmq_handle, checksums_queue))
+    sender_proc = ctx.Process(target=sender_chunking, args=(zmq_handle, checksums_queue))
+    receiver_proc = ctx.Process(target=receiver_chunking, args=(zmq_handle, checksums_queue))
 
     receiver_proc.start()
     sender_proc.start()
