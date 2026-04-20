@@ -61,3 +61,17 @@ export model_dir="$MOE_FAKE"
 unset ATTN_IMPL INFER_FA_IMPL
 . scripts/run_batch_invariant_tests.sh
 echo "✅ MoE FA3 e2e passed"
+
+echo "Running batch invariant tests for dense backbone (FA4 cute)"
+export model_dir="$DENSE_FAKE"
+export ATTN_IMPL=flash_attention_4
+export INFER_FA_IMPL=fa-invariant-cute
+. scripts/run_batch_invariant_tests.sh
+echo "✅ Dense FA4 e2e passed"
+
+echo "Running batch invariant tests for MoE backbone (FA4 cute)"
+export model_dir="$MOE_FAKE"
+export ATTN_IMPL=flash_attention_4
+export INFER_FA_IMPL=fa-invariant-cute
+. scripts/run_batch_invariant_tests.sh
+echo "✅ MoE FA4 e2e passed"
