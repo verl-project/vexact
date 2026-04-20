@@ -126,7 +126,6 @@ def test_flex_attention_paged_batch_invariance():
             [0] + [sum(decode_seq_lens[: i + 1]) for i in range(len(decode_seq_lens))],
             dtype=torch.int32,
         ),
-        past_lens=torch.tensor(decode_kv_lens, dtype=torch.int32) - 1,
     )
     output_batched_paged, _ = flex_attention_forward(
         mock_module,
@@ -151,7 +150,6 @@ def test_flex_attention_paged_batch_invariance():
             block_tables=block_table[i : i + 1],
             context_lens=torch.tensor([decode_kv_lens[i]], dtype=torch.int32),
             query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
-            past_lens=torch.tensor([decode_kv_lens[i]], dtype=torch.int32) - 1,
         )
 
         output_single_paged, _ = flex_attention_forward(
@@ -179,7 +177,7 @@ def test_flex_attention_paged_batch_invariance():
         set_kv_cache_context(
             is_paged_attn=False,
             query_start_loc=torch.tensor([0, q_len], dtype=torch.int32),
-            past_lens=torch.tensor([k_single.shape[1] - q_len], dtype=torch.int32),
+            context_lens=torch.tensor([k_single.shape[1]], dtype=torch.int32),
         )
 
         output_linear, _ = flex_attention_forward(
@@ -242,7 +240,7 @@ def test_flex_attention_vs_eager():
     set_kv_cache_context(
         is_paged_attn=False,
         query_start_loc=torch.tensor([0, S_q], dtype=torch.int32),
-        past_lens=torch.tensor([0], dtype=torch.int32),
+        context_lens=torch.tensor([S_q], dtype=torch.int32),
     )
     flex_output, _ = flex_attention_forward(
         mock_module,

@@ -107,7 +107,6 @@ def flash_attention_forward(
     # Get metadata
     block_tables = kv_context.block_tables  # (B, max_num_blocks_per_seq)
     context_lens = kv_context.context_lens  # (B,)
-    # past_lens = kv_context.past_lens
     slot_mapping = kv_context.slot_mapping  # (total_query_tokens,)
     query_start_loc = kv_context.query_start_loc  # (B+1,)
     # page_size = kv_context.page_size

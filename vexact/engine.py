@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""VExact - High-level inference engine with tokenization support."""
+"""VeXact - High-level inference engine with tokenization support."""
 
 import asyncio
 import logging
@@ -27,16 +27,16 @@ from vexact.worker.worker_proc_manager import WorkerProcManager
 logger = logging.getLogger(__name__)
 
 # Exported symbols
-__all__ = ["VExact", "DriverRequest", "DriverRequestOutput"]
+__all__ = ["VeXact", "DriverRequest", "DriverRequestOutput"]
 
 
-class VExact:
+class VeXact:
     def __init__(self, config: VeXactConfig):
         """
-        Initialize VExact engine.
+        Initialize VeXact engine.
 
         Args:
-            config: VExactConfig instance with engine configuration
+            config: VeXactConfig instance with engine configuration
         """
         self.config = config
 
@@ -51,7 +51,7 @@ class VExact:
         # Create driver client
         self.driver_client = DriverClient(config.driver)
 
-        logger.info("VExact initialized")
+        logger.info("VeXact initialized")
 
     def _load_tokenizer(self):
         """
@@ -67,7 +67,7 @@ class VExact:
         self.driver_client.close()
         if hasattr(self, "_worker_proc_manager"):
             self._worker_proc_manager.close()
-        logger.info("VExact closed")
+        logger.info("VeXact closed")
 
     def sleep(self, tag: str = None):
         """

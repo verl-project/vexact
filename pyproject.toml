@@ -18,10 +18,12 @@ gpu = [
     "torchaudio",
     "flash-attn",
     "flash-attn-3",
-    "flash-attn-4>=4.0.0b9"
+    "flash-attn-4>=4.0.0b9",
+    "nvidia-ml-py",
 ]
 dev = [
     "pytest",
+    "pytest-asyncio",
     "pre-commit"
 ]
 vllm = [

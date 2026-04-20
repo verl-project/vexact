@@ -29,7 +29,7 @@ from vexact.core.runtime_data import InputBuffers
 
 class CudaGraphManager:
     """
-    Decode-only CUDA graph capture/replay helper for VExact `model.forward`.
+    Decode-only CUDA graph capture/replay helper for VeXact `model.forward`.
 
     - Captures graphs for decode batches (seq_len=1) at specified batch sizes.
     - Uses external InputBuffers for static inputs/context.

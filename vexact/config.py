@@ -266,7 +266,7 @@ class DriverConfig:
 
     is_worker_proc_managed: bool = field(
         default=True,
-        metadata={"help": "If True, VExact manages worker subprocesses. If False, workers are launched externally."},
+        metadata={"help": "If True, VeXact manages worker subprocesses. If False, workers are launched externally."},
     )
     driver_id: Optional[str] = field(
         default=None,
@@ -301,7 +301,7 @@ class DriverConfig:
 
 @dataclass(frozen=True)
 class VeXactConfig:
-    """Top-level configuration for VExact engine."""
+    """Top-level configuration for VeXact engine."""
 
     model: ModelConfig = field(default_factory=ModelConfig)
     parallel: ParallelConfig = field(default_factory=ParallelConfig)

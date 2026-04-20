@@ -88,10 +88,6 @@ class KVCacheContext:
        Its format is like [0,3,6], which indicates the first 3 tokens belong to the first sequence,
        and the next 3 tokens belong to the second sequence.
        Shape: (batch_size + 1,)."""
-    past_lens: Optional[torch.Tensor] = None
-    """The past (pre-fill) length of each sequence.
-       Used for both paged and packed attention to calculate token positions.
-       Shape: (batch_size,)."""
     max_seqlen_q: Optional[int] = None
     """Pre-computed maximum query length for the current batch.
        When set, avoids recomputing and synchronizing max on the forward path."""
@@ -105,7 +101,7 @@ class KVCacheContext:
             assert self.context_lens is not None, "context_lens required for paged attention"
         else:
             assert self.query_start_loc is not None, "query_start_loc required for packed attention"
-            assert self.past_lens is not None, "past_lens required for packed attention"
+            assert self.context_lens is not None, "context_lens required for packed attention"
 
 
 def set_kv_cache_context(
@@ -116,7 +112,6 @@ def set_kv_cache_context(
     context_lens: Optional[torch.Tensor] = None,
     slot_mapping: Optional[torch.Tensor] = None,
     query_start_loc: Optional[torch.Tensor] = None,
-    past_lens: Optional[torch.Tensor] = None,
     max_seqlen_q: Optional[int] = None,
 ):
     """Set the global KV cache context for flex_attention"""
@@ -128,7 +123,6 @@ def set_kv_cache_context(
         context_lens=context_lens,
         slot_mapping=slot_mapping,
         query_start_loc=query_start_loc,
-        past_lens=past_lens,
         max_seqlen_q=max_seqlen_q,
     )
     _context_storage.kv_cache_context = context
