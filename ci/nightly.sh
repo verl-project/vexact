@@ -11,8 +11,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.." || exit
 echo "Current directory: $(pwd)"
 
-if [[ ! "$PWD" == */vexact ]]; then
-    echo "Error: Script must be run from vexact directory"
+if [[ ! -f "pyproject.toml" ]]; then
+    echo "Error: script must be run from the repo root (pyproject.toml not found in $PWD)"
     exit 1
 fi
 
