@@ -291,7 +291,7 @@ class BucketedWeightReceiver:
 
                     # Regular tensor
                     else:
-                        size = dtype.itemsize * shape.numel()
+                        size = torch.tensor([], dtype=dtype).element_size() * shape.numel()
                         tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
 
                         if not self.use_shm:
