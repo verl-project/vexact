@@ -37,7 +37,7 @@ COMPILE_CONFIG_PRESETS = {
     # Prefill mode: variable shapes, prioritize throughput
     "prefill": {
         "fullgraph": False,  # Variable shape -> avoid recompilation
-        "mode": None,  # Autotune for best performance
+        "mode": None,  # Default mode for best performance
         "backend": None,
         "dynamic": True,  # Shapes vary per step
     },
@@ -58,38 +58,23 @@ COMPILE_CONFIG_PRESETS = {
 }
 
 
-def get_kernel_options():
-    """Get kernel options for FlexAttention with fixed block sizes.
+_KERNEL_BLOCK_SIZE = 64
+_KERNEL_OPTIONS = {"BLOCK_M": _KERNEL_BLOCK_SIZE, "BLOCK_N": _KERNEL_BLOCK_SIZE}
 
-    The kernel execution block size is always fixed at 16 for optimal performance,
-    independent of the page_size used for KV cache organization.
-    """
-    kernel_options = {}
-    # Fixed kernel block size for optimal performance
-    block_size = 128
-    kernel_options["BLOCK_M"] = block_size
-    kernel_options["BLOCK_N"] = block_size
-    assert kernel_options["BLOCK_M"] >= block_size and kernel_options["BLOCK_N"] >= block_size, (
-        "BLOCK_M and BLOCK_N must be >= 128"
-    )
-    # kernel_options["IS_DIVISIBLE"] = False
-    # TODO: add back IS_DIVISIBLE
-    return kernel_options
+
+def get_kernel_options():
+    """Get kernel options for FlexAttention with fixed block sizes."""
+    return _KERNEL_OPTIONS
 
 
 def get_kernel_block_size():
-    """Get the fixed kernel block size for FlexAttention execution.
-
-    Returns:
-        int: The kernel block size (always 16)
-    """
-    return 128
+    """Get the fixed kernel block size for FlexAttention execution."""
+    return _KERNEL_BLOCK_SIZE
 
 
 def get_mask_mod(
     *,
     context_lens: Optional[torch.Tensor] = None,
-    past_lens: Optional[torch.Tensor] = None,
     query_start_loc: Optional[torch.Tensor] = None,
     q_len: Optional[int] = None,
     device: Optional[torch.device] = None,
@@ -99,13 +84,20 @@ def get_mask_mod(
     - causal attention (default)
 
     Notes:
-    - `past_lens[b]` offsets q positions for decode (absolute_q = past_lens[b] + q_idx).
+    - `kv_offset[b]` (derived from context_lens and query_start_loc) offsets q positions
+      for decode (absolute_q = kv_offset[b] + q_idx).
     - `context_lens[b]` caps kv_idx (kv_idx < context_lens[b]).
     """
 
+    # Derive kv_offset (replaces past_lens): number of KV entries before this step's tokens
+    kv_offset = None
+    if query_start_loc is not None and context_lens is not None:
+        tokens_per_seq = query_start_loc[1:] - query_start_loc[:-1]
+        kv_offset = context_lens - tokens_per_seq  # shape: (num_seqs,)
+
     # Precompute chunk mapping for packed chunks
     chunk_mapping = None
-    if query_start_loc is not None and past_lens is not None and query_start_loc.shape[0] > 2 and q_len is not None:
+    if query_start_loc is not None and kv_offset is not None and query_start_loc.shape[0] > 2 and q_len is not None:
         # Optimized vectorized implementation:
         lengths = query_start_loc[1:] - query_start_loc[:-1]
         chunk_ids = torch.arange(lengths.shape[0], device=device, dtype=torch.int64)
@@ -115,15 +107,15 @@ def get_mask_mod(
         # All args are torch.Tensors (often int32/int64 scalars). Keep tensor ops only.
         if chunk_mapping is not None:
             chunk_idx = chunk_mapping[q_idx]
-            p_len = past_lens[chunk_idx]
+            offset = kv_offset[chunk_idx]
             q_start = query_start_loc[chunk_idx]
-            abs_q = p_len + (q_idx - q_start)
+            abs_q = offset + (q_idx - q_start)
 
             ok = kv_idx <= abs_q  # causal
             if context_lens is not None:
                 ok = ok & (kv_idx < context_lens[chunk_idx])
         else:
-            abs_q = q_idx if past_lens is None else (past_lens[b] + q_idx)
+            abs_q = q_idx if kv_offset is None else (kv_offset[b] + q_idx)
 
             ok = kv_idx <= abs_q  # causal
             if context_lens is not None:
@@ -164,6 +156,9 @@ def get_compile_config(is_decode: bool, preset: str = "default") -> dict:
     return COMPILE_CONFIG_PRESETS[preset].copy()
 
 
+_compile_cache: dict = {}
+
+
 def _get_compiled_flex_attention(
     *,
     dynamic: bool,
@@ -173,65 +168,31 @@ def _get_compiled_flex_attention(
     page_flag: bool = False,
 ):
     """Return a cached `torch.compile(flex_attention, ...)` wrapper."""
-    kwargs = {"dynamic": dynamic, "fullgraph": fullgraph}
-    if mode is not None:
-        kwargs["mode"] = mode
-    if backend is not None:
-        kwargs["backend"] = backend
-
-    return torch.compile(flex_attention, **kwargs)
-
-
-def _get_compiled_flex_attention_paged(
-    *,
-    dynamic: bool,
-    mode: Optional[str],
-    fullgraph: bool,
-    backend: Optional[str],
-    page_flag: bool = False,
-):
-    """Return a cached `torch.compile(flex_attention, ...)` wrapper."""
-    kwargs = {"dynamic": dynamic, "fullgraph": fullgraph}
-    if mode is not None:
-        kwargs["mode"] = mode
-    if backend is not None:
-        kwargs["backend"] = backend
-
-    return torch.compile(flex_paged_attention_core, **kwargs)
+    cache_key = ("flex", dynamic, mode, fullgraph, backend, page_flag)
+    if cache_key not in _compile_cache:
+        kwargs = {"dynamic": dynamic, "fullgraph": fullgraph}
+        if mode is not None:
+            kwargs["mode"] = mode
+        if backend is not None:
+            kwargs["backend"] = backend
+        _compile_cache[cache_key] = torch.compile(flex_attention, **kwargs)
+    return _compile_cache[cache_key]
 
 
-def _get_compiled_create_block_mask(
-    *,
-    dynamic: bool,
-    mode: Optional[str],
-    fullgraph: bool,
-    backend: Optional[str],
-):
+_paged_block_mask_cache: dict = {}
+
+
+def _prepare_paged_kv(ctx, query, key, value, layer_idx):
     """
-    Return a cached `torch.compile(create_block_mask, ...)` wrapper.
+    Prepare KV tensors and block mask for paged attention.
 
-    Note: Only enable if your mask_mod is stable across calls; otherwise Dynamo may recompile often.
-    """
-    kwargs = {"dynamic": dynamic, "fullgraph": fullgraph}
-    if mode is not None:
-        kwargs["mode"] = mode
-    if backend is not None:
-        kwargs["backend"] = backend
-    return torch.compile(create_block_mask, **kwargs)
-
-
-def flex_paged_attention_core(ctx, query, key, value, layer_idx, scaling):
-    """
-    Core paged attention computation that can be compiled.
-
-    Returns:
-        query, k, v, block_mask
+    Uses zero-copy view of the physical cache and caches the block mask
+    across layers within the same inference step.
     """
     block_tables: torch.Tensor = ctx.block_tables
     context_lens: torch.Tensor = ctx.context_lens
-    past_lens: torch.Tensor = ctx.past_lens
     slot_mapping: torch.Tensor = ctx.slot_mapping
-    # query_start_loc: torch.Tensor = ctx.query_start_loc
+    query_start_loc: Optional[torch.Tensor] = ctx.query_start_loc
 
     key_cache: torch.Tensor = ctx.key_cache
     value_cache: torch.Tensor = ctx.value_cache
@@ -239,103 +200,78 @@ def flex_paged_attention_core(ctx, query, key, value, layer_idx, scaling):
     bsz, q_heads, q_len, head_dim = query.shape
     num_blocks, page_size, kv_heads, _ = key_cache[layer_idx].shape
     total_slots = num_blocks * page_size
-    device = query.device
 
     if key is not None:
-        _, kv_heads, s_new, _ = key.shape
-        # Flatten batch dimension: (B, K, nKVH, D) -> (total_tokens, nKVH, D)
-        key_flat = key.reshape(-1, kv_heads, head_dim)
-        value_flat = value.reshape(-1, kv_heads, head_dim)
+        # key/value come in (B, H, L, D) layout from HF's attention transpose.
+        # Collapse to (B*L, H, D) for slot-mapped cache store. Without the explicit
+        # .transpose(1, 2), reshape(-1, H, D) on the non-contiguous transposed view
+        # collapses B*H instead of B*L whenever L == H, giving wrong semantics.
+        key_flat = key.transpose(1, 2).reshape(-1, kv_heads, head_dim)
+        value_flat = value.transpose(1, 2).reshape(-1, kv_heads, head_dim)
         store_kvcache(key_flat, value_flat, key_cache[layer_idx], value_cache[layer_idx], slot_mapping)
 
-    # Reshape cache to (1, H, total_slots, D) for flex_attention
-    # (num_blocks, page_size, H, D) -> (1, H, total_slots, D)
-    k_reshaped = (
-        key_cache[layer_idx]
-        .view(num_blocks * page_size, kv_heads, head_dim)  # (total_slots, H, D)
-        .transpose(0, 1)  # (H, total_slots, D)
-        .unsqueeze(0)  # (1, H, total_slots, D)
-    )
-    v_reshaped = (
-        value_cache[layer_idx]
-        .view(num_blocks * page_size, kv_heads, head_dim)  # (total_slots, H, D)
-        .transpose(0, 1)  # (H, total_slots, D)
-        .unsqueeze(0)  # (1, H, total_slots, D)
-    )
+    # Zero-copy view: (num_blocks, page_size, H, D) -> (1, H, total_slots, D)
+    k_reshaped = key_cache[layer_idx].view(total_slots, kv_heads, head_dim).transpose(0, 1).unsqueeze(0)
+    v_reshaped = value_cache[layer_idx].view(total_slots, kv_heads, head_dim).transpose(0, 1).unsqueeze(0)
 
-    # Build physical to logical block mapping
-    max_num_blocks = block_tables.shape[1]
-    num_physical_blocks = key_cache[layer_idx].shape[0]
-    physical_to_logical = torch.full((bsz, num_physical_blocks), -1, dtype=torch.int64, device=device)
-    logical_grid = torch.arange(max_num_blocks, device=device, dtype=torch.int64).unsqueeze(0).expand(bsz, -1)
-    valid_mask = block_tables >= 0
-    safe_physical_indices = torch.where(valid_mask, block_tables, torch.zeros_like(block_tables))
-    physical_to_logical.scatter_(1, safe_physical_indices, logical_grid)
-    mask_values = torch.where(valid_mask, logical_grid, torch.full_like(logical_grid, -1))
-    physical_to_logical.scatter_(1, safe_physical_indices, mask_values)
+    # Cache block_mask per context (reusable across layers within same step)
+    cache_key = (id(ctx), q_len)
+    if cache_key not in _paged_block_mask_cache:
+        _paged_block_mask_cache.clear()
 
-    # Precompute chunk mapping for packed chunks
-    # chunk_mapping = None
-    # if query_start_loc is not None and past_lens is not None and query_start_loc.shape[0] > 2 and q_len > 1:
-    #     # Optimized vectorized implementation:
-    #     lengths = query_start_loc[1:] - query_start_loc[:-1]
-    #     chunk_ids = torch.arange(lengths.shape[0], device=device, dtype=torch.int64)
-    #     chunk_mapping = torch.repeat_interleave(chunk_ids, lengths)
+        # block_tables/context_lens are keyed by per-seq index, but the flex
+        # attention call's batch dim (bsz) may be packed to 1 across multiple
+        # seqs. Use num_seqs for the per-seq mapping and derive seq_id from
+        # q_idx via query_start_loc when packed.
+        num_seqs = block_tables.shape[0]
+        max_num_blocks = block_tables.shape[1]
+        device = query.device
+        physical_to_logical = torch.full((num_seqs, num_blocks), -1, dtype=torch.int64, device=device)
+        logical_grid = torch.arange(max_num_blocks, device=device, dtype=torch.int64).unsqueeze(0).expand(num_seqs, -1)
+        valid_mask = block_tables >= 0
+        batch_idx = torch.arange(num_seqs, device=device).unsqueeze(1).expand_as(block_tables)
+        physical_to_logical[batch_idx[valid_mask], block_tables[valid_mask]] = logical_grid[valid_mask]
 
-    # Physical mask function
-    def physical_mask_mod(b, h, q_idx, physical_kv_idx):
-        """Mask function that works directly with physical KV indices in the cache"""
-        # Convert physical index to logical position
-        physical_block = physical_kv_idx // page_size
-        block_offset = physical_kv_idx % page_size
+        # chunk_mapping[q_idx] -> seq_id is only meaningful when queries from
+        # multiple seqs are packed into bsz=1 (q_idx iterates across seqs).
+        # When bsz > 1 each seq already has its own flex batch dim and `b` is
+        # the seq id -- q_idx is per-batch-local and must not index chunk_mapping.
+        chunk_mapping = None
+        kv_offset = None
+        if bsz == 1 and query_start_loc is not None and query_start_loc.shape[0] > 2:
+            lengths = query_start_loc[1:] - query_start_loc[:-1]
+            chunk_ids = torch.arange(lengths.shape[0], device=device, dtype=torch.int64)
+            chunk_mapping = torch.repeat_interleave(chunk_ids, lengths)
+            kv_offset = context_lens - lengths  # per-seq start of this step in the KV cache
 
-        # Handle chunked queries
-        # if chunk_mapping is not None:
-        #     chunk_idx = chunk_mapping[q_idx]
-        #     logical_block = physical_to_logical[chunk_idx, physical_block]
-        #     logical_kv_idx = logical_block * page_size + block_offset
+        def physical_mask_mod(b, h, q_idx, physical_kv_idx):
+            if chunk_mapping is not None:
+                seq_id = chunk_mapping[q_idx]
+                abs_q = kv_offset[seq_id] + (q_idx - query_start_loc[seq_id])
+            else:
+                seq_id = b
+                abs_q = (context_lens[seq_id] - q_len) + q_idx
 
-        #     p_len = past_lens[chunk_idx]
-        #     q_start = query_start_loc[chunk_idx]
-        #     abs_q = p_len + (q_idx - q_start)
+            physical_block = physical_kv_idx // page_size
+            block_offset = physical_kv_idx % page_size
+            logical_block = physical_to_logical[seq_id, physical_block]
+            logical_kv_idx = logical_block * page_size + block_offset
 
-        #     ok = logical_kv_idx <= abs_q
-        #     if context_lens is not None:
-        #         ok = ok & (logical_kv_idx < context_lens[chunk_idx])
-        # else:
-        logical_block = physical_to_logical[b, physical_block]
-        logical_kv_idx = logical_block * page_size + block_offset
+            ok = logical_kv_idx <= abs_q
+            if context_lens is not None:
+                ok = ok & (logical_kv_idx < context_lens[seq_id])
+            return torch.where(logical_block >= 0, ok, False)
 
-        abs_q = past_lens[b] + q_idx
-        ok = logical_kv_idx <= abs_q
+        _paged_block_mask_cache[cache_key] = create_block_mask(
+            physical_mask_mod,
+            bsz,
+            q_heads,
+            q_len,
+            total_slots,
+            BLOCK_SIZE=get_kernel_block_size(),
+        )
 
-        if context_lens is not None:
-            ok = ok & (logical_kv_idx < context_lens[b])
-
-        return torch.where(logical_block >= 0, ok, False)
-
-    # Create block mask with physical addressing
-    block_mask = create_block_mask(
-        physical_mask_mod,
-        bsz,
-        q_heads,
-        q_len,
-        total_slots,
-        BLOCK_SIZE=get_kernel_block_size(),
-    )
-
-    # Run flex attention
-    attn_output = flex_attention(
-        query,
-        k_reshaped,
-        v_reshaped,
-        block_mask=block_mask,
-        scale=scaling,
-        kernel_options=get_kernel_options(),
-        enable_gqa=True,
-    )
-
-    return attn_output
+    return k_reshaped, v_reshaped, _paged_block_mask_cache[cache_key]
 
 
 def _flatten_attn_output(attn_output: torch.Tensor) -> torch.Tensor:
@@ -405,13 +341,10 @@ def flex_attention_forward(
 
     if use_compile:
         flex_attn_fn = _get_compiled_flex_attention(**common)
-        flex_attn_fn_paged = _get_compiled_flex_attention_paged(**common)
-        # create_block_mask_fn = _get_compiled_create_block_mask(**common)
         create_block_mask_fn = create_block_mask
 
     else:
         flex_attn_fn = flex_attention
-        flex_attn_fn_paged = flex_paged_attention_core
         create_block_mask_fn = create_block_mask
 
     # ---------------------Start attention-----------------------#
@@ -425,13 +358,11 @@ def flex_attention_forward(
             kv_len = ctx.kv_len
 
         context_lens = ctx.context_lens
-        past_lens = ctx.past_lens
         query_start_loc = ctx.query_start_loc
 
         block_mask = create_block_mask_fn(
             get_mask_mod(
                 context_lens=context_lens,
-                past_lens=past_lens,
                 query_start_loc=query_start_loc,
                 q_len=q_len,
                 device=query.device,
@@ -461,7 +392,19 @@ def flex_attention_forward(
 
         layer_idx = kwargs.get("layer_idx") if "layer_idx" in kwargs else getattr(module, "layer_idx", 0)
         layer_idx = int(layer_idx)
-        attn_output = flex_attn_fn_paged(ctx, query, key, value, layer_idx, scaling)
+
+        # Gather KV and build mask outside compile, then run compiled flex_attention
+        gathered_k, gathered_v, block_mask = _prepare_paged_kv(ctx, query, key, value, layer_idx)
+        attn_output = flex_attn_fn(
+            query,
+            gathered_k,
+            gathered_v,
+            block_mask=block_mask,
+            scale=scaling,
+            kernel_options=get_kernel_options(),
+            enable_gqa=True,
+        )
 
     attn_output = _flatten_attn_output(attn_output)
+
     return attn_output, None
