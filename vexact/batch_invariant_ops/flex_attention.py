@@ -179,9 +179,6 @@ def _get_compiled_flex_attention(
     return _compile_cache[cache_key]
 
 
-_paged_block_mask_cache: dict = {}
-
-
 def _prepare_paged_kv(ctx, query, key, value, layer_idx):
     """
     Prepare KV tensors and block mask for paged attention.
@@ -214,11 +211,10 @@ def _prepare_paged_kv(ctx, query, key, value, layer_idx):
     k_reshaped = key_cache[layer_idx].view(total_slots, kv_heads, head_dim).transpose(0, 1).unsqueeze(0)
     v_reshaped = value_cache[layer_idx].view(total_slots, kv_heads, head_dim).transpose(0, 1).unsqueeze(0)
 
-    # Cache block_mask per context (reusable across layers within same step)
-    cache_key = (id(ctx), q_len)
-    if cache_key not in _paged_block_mask_cache:
-        _paged_block_mask_cache.clear()
-
+    # Cache block_mask on ctx (thread-local, reused across layers within same step).
+    # q_len is invariant within a step, so a single slot suffices.
+    block_mask = getattr(ctx, "_paged_block_mask", None)
+    if block_mask is None:
         # block_tables/context_lens are keyed by per-seq index, but the flex
         # attention call's batch dim (bsz) may be packed to 1 across multiple
         # seqs. Use num_seqs for the per-seq mapping and derive seq_id from
@@ -262,7 +258,7 @@ def _prepare_paged_kv(ctx, query, key, value, layer_idx):
                 ok = ok & (logical_kv_idx < context_lens[seq_id])
             return torch.where(logical_block >= 0, ok, False)
 
-        _paged_block_mask_cache[cache_key] = create_block_mask(
+        block_mask = create_block_mask(
             physical_mask_mod,
             bsz,
             q_heads,
@@ -270,8 +266,9 @@ def _prepare_paged_kv(ctx, query, key, value, layer_idx):
             total_slots,
             BLOCK_SIZE=get_kernel_block_size(),
         )
+        ctx._paged_block_mask = block_mask
 
-    return k_reshaped, v_reshaped, _paged_block_mask_cache[cache_key]
+    return k_reshaped, v_reshaped, block_mask
 
 
 def _flatten_attn_output(attn_output: torch.Tensor) -> torch.Tensor:
