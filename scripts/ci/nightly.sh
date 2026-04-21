@@ -1,7 +1,9 @@
 #!/bin/bash
 
 # Nightly batch-invariance CI entry point. Invoke from the repo root with
-# DENSE_MODEL_PATH and MOE_MODEL_PATH set.
+# DENSE_MODEL_PATH and MOE_MODEL_PATH set. Set USE_FAKE_MODEL=0 to run the
+# e2e verification directly against the original checkpoints (skip the
+# 4-layer random-weights truncation used by default).
 
 set -ex
 
@@ -34,30 +36,51 @@ uv run pytest -s tests/batch_invariant_ops/
 : "${DENSE_MODEL_PATH:?DENSE_MODEL_PATH must be set to a Qwen3 dense checkpoint}"
 : "${MOE_MODEL_PATH:?MOE_MODEL_PATH must be set to a Qwen3 MoE checkpoint}"
 
-FAKE_ROOT="$(mktemp -d)"
-trap 'rm -rf "$FAKE_ROOT"' EXIT
+USE_FAKE_MODEL=${USE_FAKE_MODEL:-1}
+if [[ "$USE_FAKE_MODEL" == "1" ]]; then
+    FAKE_ROOT="$(mktemp -d)"
+    trap 'rm -rf "$FAKE_ROOT"' EXIT
 
-DENSE_FAKE="$FAKE_ROOT/dense-fake"
-MOE_FAKE="$FAKE_ROOT/moe-fake"
+    DENSE_DIR="$FAKE_ROOT/dense-fake"
+    MOE_DIR="$FAKE_ROOT/moe-fake"
 
-python tests/scripts/init_random_weights.py \
-    --model-dir "$DENSE_MODEL_PATH" \
-    --output-dir "$DENSE_FAKE" \
-    --num-layers 4 --verify
+    python tests/scripts/init_random_weights.py \
+        --model-dir "$DENSE_MODEL_PATH" \
+        --output-dir "$DENSE_DIR" \
+        --num-layers 4 --verify
 
-python tests/scripts/init_random_weights.py \
-    --model-dir "$MOE_MODEL_PATH" \
-    --output-dir "$MOE_FAKE" \
-    --num-layers 4 --verify
+    python tests/scripts/init_random_weights.py \
+        --model-dir "$MOE_MODEL_PATH" \
+        --output-dir "$MOE_DIR" \
+        --num-layers 4 --verify
+else
+    echo "USE_FAKE_MODEL=0 — running e2e against original checkpoints"
+    DENSE_DIR="$DENSE_MODEL_PATH"
+    MOE_DIR="$MOE_MODEL_PATH"
+fi
 
 echo "Running batch invariant tests for dense backbone (FA3)"
-export model_dir="$DENSE_FAKE"
+export model_dir="$DENSE_DIR"
 unset ATTN_IMPL INFER_FA_IMPL
 . scripts/run_batch_invariant_tests.sh
 echo "✅ Dense FA3 e2e passed"
 
 echo "Running batch invariant tests for MoE backbone (FA3)"
-export model_dir="$MOE_FAKE"
+export model_dir="$MOE_DIR"
 unset ATTN_IMPL INFER_FA_IMPL
 . scripts/run_batch_invariant_tests.sh
 echo "✅ MoE FA3 e2e passed"
+
+echo "Running batch invariant tests for dense backbone (FA4 cute)"
+export model_dir="$DENSE_DIR"
+export ATTN_IMPL=flash_attention_4
+export INFER_FA_IMPL=fa-invariant-cute
+. scripts/run_batch_invariant_tests.sh
+echo "✅ Dense FA4 e2e passed"
+
+echo "Running batch invariant tests for MoE backbone (FA4 cute)"
+export model_dir="$MOE_DIR"
+export ATTN_IMPL=flash_attention_4
+export INFER_FA_IMPL=fa-invariant-cute
+. scripts/run_batch_invariant_tests.sh
+echo "✅ MoE FA4 e2e passed"
