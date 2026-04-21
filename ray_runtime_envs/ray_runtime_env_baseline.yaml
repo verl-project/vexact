@@ -1,0 +1,9 @@
+working_dir: "."
+excludes: ["**/.git", "**.deb", "**.nsys-rep*", "**/tokenizer.json", "**/data/*.json*", "**/examples", "**/tests"]
+py_executable: "uv -v run --frozen --extra gpu --extra vllm"
+env_vars:
+  # veRL
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  VERL_LOGGING_LEVEL: "WARN"
+  # VeOmni
+  VEOMNI_USE_LIGER_KERNEL: "0"

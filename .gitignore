@@ -77,5 +77,5 @@ logs/
 .env.local
 
 # vexact tests
-./verl
+/verl
 inference_outputs*

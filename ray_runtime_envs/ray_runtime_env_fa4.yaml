@@ -1,0 +1,14 @@
+working_dir: "."
+excludes: ["**/.git", "**.deb", "**.nsys-rep*", "**/tokenizer.json", "**/data/*.json*", "**/examples", "**/tests"]
+py_executable: "uv -v run --frozen --extra gpu"
+env_vars:
+  # veRL
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  VERL_LOGGING_LEVEL: "WARN"
+  VERL_USE_EXTERNAL_MODULES: "vexact.integrations.verl.register"
+  # VeOmni
+  VEOMNI_USE_LIGER_KERNEL: "0"
+  # FA4 kernel selections (for MLA / Blackwell models)
+  VEOMNI_ATTN_IMPLEMENTATION: "veomni_flash_attention_4_with_sp"
+  VEOMNI_MOE_IMPLEMENTATION: "fused_quack"
+  INFER_FA_IMPL: "fa-invariant-cute"
