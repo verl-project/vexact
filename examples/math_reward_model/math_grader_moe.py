@@ -13,7 +13,7 @@ def extract_answer_with_fallback(solution_str: str) -> tuple:
     Returns (answer, extraction_source) where extraction_source is one of:
     'boxed' or None if extraction failed.
     """
-    from experimental.math_reward_model.math_utils import extract_answer
+    from examples.math_reward_model.math_utils import extract_answer
 
     # Try standard \boxed{} extraction
     model_answer = extract_answer(solution_str)
@@ -37,7 +37,7 @@ def compute_math_score(
     # print("=" * 80)
     # ===== DEBUG END =====
 
-    from experimental.math_reward_model.math_utils import extract_answer, grade_answer_mathd
+    from examples.math_reward_model.math_utils import extract_answer, grade_answer_mathd
 
     # Handle thought tags flexibly - support both DeepSeek-style and Qwen-style outputs
     THINK_START = "<think>"
@@ -159,7 +159,7 @@ class ProcessPoolManager:
 
 
 def run_grade_answer_sympy_with_timeout(model_answer: str, ground_truth: str, timeout: float = 10.0) -> bool:
-    from experimental.math_reward_model.math_utils import grade_answer_sympy
+    from examples.math_reward_model.math_utils import grade_answer_sympy
 
     process_pool_manager = ProcessPoolManager()
     pool = process_pool_manager.get_pool()

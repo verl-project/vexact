@@ -38,21 +38,7 @@ hdfs_base="/mnt/hdfs/vexact_exp/${exp_name}"
 
 checkpoint_path="${hdfs_base}/checkpoints"
 
-# Parallel config for veomni engine
-# actor_rollout_ref.actor.veomni.ulysses_parallel_size="${SP_SIZE}"
-# set SP_SIZE to handle memory issue
 
-
-# modify max_cache_blocks in vexact/config.py
-# vexact does not support configuring actor_rollout_ref.rollout.gpu_memory_utilization
-    # max_cache_blocks: int = field(
-    #     default=1024,
-    #     metadata={"help": "Maximum number of KV cache blocks available for continuous batching."},
-    # )
-
-# important: set rollout.tensor_model_parallel_size=1, since the default value is 2 in verl
-
-# Train over 2 nodes, 8 A100-80GB GPUs per node.
 RAY_DEDUP_LOGS=0 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     model_engine=veomni \
     algorithm.adv_estimator=reinforce_plus_plus \

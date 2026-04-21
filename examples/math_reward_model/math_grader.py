@@ -28,7 +28,7 @@ def compute_math_score(
         }
     solution_str = solution_str.split(THINK_END)[1]
 
-    from experimental.math_reward_model.math_utils import extract_answer, grade_answer_mathd
+    from examples.math_reward_model.math_utils import extract_answer, grade_answer_mathd
 
     model_answer = extract_answer(solution_str)
     if model_answer is None:
@@ -127,7 +127,7 @@ class ProcessPoolManager:
 
 
 def run_grade_answer_sympy_with_timeout(model_answer: str, ground_truth: str, timeout: float = 10.0) -> bool:
-    from experimental.math_reward_model.math_utils import grade_answer_sympy
+    from examples.math_reward_model.math_utils import grade_answer_sympy
 
     process_pool_manager = ProcessPoolManager()
     pool = process_pool_manager.get_pool()

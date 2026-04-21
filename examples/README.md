@@ -1,8 +1,9 @@
 # Examples
 
-End-to-end RL training recipes using VeXact as the rollout engine (with
-[verl](https://github.com/volcengine/verl) as the RL framework, and optionally
-[VeOmni](https://github.com/ByteDance-Seed/VeOmni) as the training engine).
+End-to-end RL training recipes using VeXact as the rollout engine, with
+[verl](https://github.com/volcengine/verl) as the RL framework, and either
+**torch FSDP2** or
+**[VeOmni](https://github.com/ByteDance-Seed/VeOmni)** as the training engine.
 
 ## Layout
 
@@ -64,7 +65,7 @@ On B200 (SM100+) the FA4 CUTE kernel is used:
 export INFER_FA_IMPL=fa-invariant-cute   # FA4, B200
 ```
 
-## `verify/` — batch-invariant check
+## `verify/` — why batch invariance matters in RL
 
 `run_dense_vexact.sh` and `run_dense_vllm.sh` share identical hyperparameters;
 they differ only in `actor_rollout_ref.rollout.name` (`vexact` vs `vllm`). The
