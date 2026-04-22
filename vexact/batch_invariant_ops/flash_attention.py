@@ -33,6 +33,7 @@ def flash_attention_forward(
     dropout: float = 0.0,
     sliding_window: Optional[int] = None,
     use_cute: bool = False,
+    lock_num_splits: bool = True,
     **kwargs,
 ):
     """
@@ -139,6 +140,11 @@ def flash_attention_forward(
     # max_seqlen_k = context_lens.max().item()
     from vexact.utils.device import DEVICE_MAJOR
 
+    # num_splits=1 keeps the FA Split-KV reduction in a single group, which is
+    # necessary for batch-invariance (otherwise the kernel picks split counts
+    # based on batch shape, changing LSE reduction order).
+    # When lock_num_splits=False, let the kernel pick splits dynamically.
+    split_kwargs = {"num_splits": 1} if lock_num_splits else {}
     if use_cute:
         assert DEVICE_MAJOR >= 9, f"FA4 (flash_attn.cute) requires SM90+, got SM{DEVICE_MAJOR}0"
         from flash_attn.cute import flash_attn_varlen_func
@@ -155,7 +161,7 @@ def flash_attention_forward(
             page_table=block_tables,  # (B, max_num_blocks_per_seq) int32
             softmax_scale=scaling,
             causal=True,
-            num_splits=1,
+            **split_kwargs,
         )
     else:
         assert DEVICE_MAJOR == 9, f"FA3 requires SM90, got SM{DEVICE_MAJOR}0"
@@ -174,7 +180,7 @@ def flash_attention_forward(
             causal=True,
             page_table=block_tables,
             # window_size=window_size
-            num_splits=1,
+            **split_kwargs,
         )
     # Output shape: (H, total_query_tokens, D)
     return attn_output, None
@@ -182,3 +188,7 @@ def flash_attention_forward(
 
 # FA4 (flash_attn.cute) variant — forces use_cute=True on both Hopper and Blackwell
 flash_attention_forward_cute = partial(flash_attention_forward, use_cute=True)
+
+# Non-invariant variant: same kernel but without the num_splits=1 lock,
+# so the kernel is free to pick Split-KV counts for best throughput.
+flash_attention_forward_variant = partial(flash_attention_forward, lock_num_splits=False)

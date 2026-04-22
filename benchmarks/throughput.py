@@ -47,12 +47,13 @@ def build_vexact_engine(
     profiler_delay_iterations: int = 0,
     profiler_max_iterations: int = 0,
     attn_impl: str = "fa-invariant",
+    enable_batch_invariant: bool = True,
 ):
     config = VeXactConfig(
         model=ModelConfig(
             model_path=model_path,
             attn_impl=attn_impl,
-            enable_batch_invariant=True,
+            enable_batch_invariant=enable_batch_invariant,
             enable_memory_saver=False,
             enforce_eager=False,
             use_fp32_logits=True,
@@ -225,10 +226,20 @@ def _parse_args():
         help="Python logging level (e.g., DEBUG, INFO, WARNING).",
     )
     parser.add_argument(
+        "--mode",
+        choices=["invariant", "variant"],
+        default="invariant",
+        help=(
+            "Batch-invariance mode. 'invariant' (default) keeps the batch-invariant "
+            "ATen patches on and defaults attn to fa-invariant. 'variant' disables "
+            "the patches and defaults attn to fa-variant (num_splits unlocked)."
+        ),
+    )
+    parser.add_argument(
         "--attn-impl",
-        choices=["fa-invariant", "fa-invariant-cute", "flex"],
-        default="fa-invariant",
-        help="Attention implementation (default: fa-invariant, i.e. flash attn).",
+        choices=["fa-invariant", "fa-invariant-cute", "flex", "fa-variant"],
+        default=None,
+        help=("Attention implementation. If unset, follows --mode: invariant -> fa-invariant, variant -> fa-variant."),
     )
     parser.add_argument(
         "--profile-backend",
@@ -262,6 +273,8 @@ def main():
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         force=True,
     )
+    if args.attn_impl is None:
+        args.attn_impl = "fa-invariant" if args.mode == "invariant" else "fa-variant"
     engine = build_vexact_engine(
         model_path=args.model_path,
         pp_size=args.pp_size,
@@ -273,6 +286,7 @@ def main():
         profiler_delay_iterations=args.profile_delay_iterations,
         profiler_max_iterations=args.profile_max_iterations,
         attn_impl=args.attn_impl,
+        enable_batch_invariant=(args.mode == "invariant"),
     )
     try:
         total_prompt_tokens, total_output_tokens, latencies, errors, completed, total_time = run_throughput(
@@ -304,6 +318,7 @@ def main():
     print(f"\n{'=' * 60}")
     print("THROUGHPUT SUMMARY")
     print(f"{'=' * 60}")
+    print(f"Mode: {args.mode} | attn_impl: {args.attn_impl}")
     print(f"Throughput: {rps:.2f} requests/s, {total_tps:.2f} total tokens/s, {output_tps:.2f} output tokens/s")
     print(f"Total num prompt tokens:  {total_prompt_tokens}")
     print(f"Total num output tokens:  {total_output_tokens}")

@@ -135,7 +135,7 @@ class ModelConfig:
             raise ValueError("model_path is required!\nUsage: python script.py model.model_path=/path/to/model")
 
         # Validate attention implementation
-        valid_attn_impls = ["fa-invariant", "fa-invariant-cute", "flex"]
+        valid_attn_impls = ["fa-invariant", "fa-invariant-cute", "flex", "fa-variant"]
         if self.attn_impl not in valid_attn_impls:
             raise ValueError(f"attn_impl must be one of {valid_attn_impls}, got '{self.attn_impl}'")
 
