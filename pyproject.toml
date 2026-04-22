@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "TODO"
 requires-python = ">=3.12, <3.13"
 dependencies = [
-    "verl",
     "transformers",
     "torch_memory_saver==0.0.9; platform_machine != 'aarch64'",
     "pyzmq>=27.1.0",
@@ -27,7 +26,10 @@ dev = [
     "pre-commit"
 ]
 vllm = [
-    "vllm==0.17.0",
+    "vllm==0.18.0",
+]
+verl = [
+    "verl",
 ]
 
 [build-system]
