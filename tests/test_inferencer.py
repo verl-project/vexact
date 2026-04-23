@@ -111,8 +111,8 @@ def model(model_config, model_path, device) -> torch.nn.Module:
 
 @pytest.fixture
 def baseline_inferenceroutput(repo_root) -> InferencerOutput:
-    logits = torch.load(repo_root / "vexact/tests/ref_data/inferencer_baseline_logits.pt", map_location="cpu")
-    token_ids = torch.load(repo_root / "vexact/tests/ref_data/inferencer_baseline_token_ids.pt", map_location="cpu")
+    logits = torch.load(repo_root / "tests/ref_data/inferencer_baseline_logits.pt", map_location="cpu")
+    token_ids = torch.load(repo_root / "tests/ref_data/inferencer_baseline_token_ids.pt", map_location="cpu")
     return InferencerOutput(token_ids=token_ids, logits=logits, logprobs=torch.empty(0))
 
 
@@ -162,7 +162,7 @@ def test_pp_first_rank(repo_root, model_config, model_path, cache_config, infere
     gen_ctx = inferencer._prepare_gen_ctx([inference_request])
     intermediate_outputs = inferencer._forward(gen_ctx)
 
-    expected_intermediate = torch.load(repo_root / "vexact/tests/ref_data/first_rank_intermediate.pt")
+    expected_intermediate = torch.load(repo_root / "tests/ref_data/first_rank_intermediate.pt")
     assert torch.equal(intermediate_outputs.hidden_states, expected_intermediate)
 
 
@@ -187,10 +187,10 @@ def test_pp_mid_rank(repo_root, model_config, model_path, cache_config, inferenc
 
     gen_ctx = inferencer._prepare_gen_ctx([inference_request])
     gen_ctx.batch_input_ids = None
-    gen_ctx.intermediate_tensors = torch.load(repo_root / "vexact/tests/ref_data/first_rank_intermediate.pt")
+    gen_ctx.intermediate_tensors = torch.load(repo_root / "tests/ref_data/first_rank_intermediate.pt")
     intermediate_outputs = inferencer._forward(gen_ctx)
 
-    expected_intermediate = torch.load(repo_root / "vexact/tests/ref_data/mid_rank_intermediate.pt")
+    expected_intermediate = torch.load(repo_root / "tests/ref_data/mid_rank_intermediate.pt")
     assert torch.equal(intermediate_outputs.hidden_states, expected_intermediate)
 
 
@@ -217,7 +217,7 @@ def test_pp_last_rank(
 
     gen_ctx = inferencer._prepare_gen_ctx([inference_request])
     gen_ctx.batch_input_ids = None
-    gen_ctx.intermediate_tensors = torch.load(repo_root / "vexact/tests/ref_data/mid_rank_intermediate.pt")
+    gen_ctx.intermediate_tensors = torch.load(repo_root / "tests/ref_data/mid_rank_intermediate.pt")
 
     outputs = inferencer._forward(gen_ctx)
 
