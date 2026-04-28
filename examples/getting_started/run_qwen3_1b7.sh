@@ -3,7 +3,7 @@ set -x
 # Model: Qwen3-1.7B
 model_path="${model_dir}"
 
-# Data: DAPO-Math-17k (train) / AIME 2025 (val)
+# Data: DAPO-Math-17k (train) / AIME 2024 (val)
 train_path="${train_path}"
 test_path="${test_path}"
 
