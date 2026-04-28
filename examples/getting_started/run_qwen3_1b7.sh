@@ -1,10 +1,11 @@
 set -x
 
 # Model: Qwen3-1.7B
-model_path="${model_dir:-/mnt/hdfs/model_path}"
+model_path="${model_dir}"
 
-# Data: gsm8k (parquet)
-data_path="${data_dir:-/mnt/hdfs/data_path}"
+# Data: DAPO-Math-17k (train) / AIME 2024 (val)
+train_path="${train_path}"
+test_path="${test_path}"
 
 # Register vexact rollout globally
 export VERL_USE_EXTERNAL_MODULES=vexact.integrations.verl.register
@@ -36,8 +37,8 @@ EP_SIZE=${EP_SIZE:-1}
 python3 -m verl.trainer.main_ppo \
     model_engine=veomni \
     algorithm.adv_estimator=grpo \
-    data.train_files=$data_path/train.parquet \
-    data.val_files=$data_path/test.parquet \
+    data.train_files=$train_path/dapo-math-17k.parquet \
+    data.val_files=$test_path/aime-2024.parquet \
     data.return_raw_chat=False \
     data.train_batch_size=1024 \
     data.max_prompt_length=512 \
@@ -90,11 +91,12 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.profiler.save_path=$profile_save_path \
     actor_rollout_ref.ref.veomni.optimizer_offload=True \
     algorithm.use_kl_in_reward=False \
+    reward.reward_manager.name=dapo \
     trainer.use_legacy_worker_impl=disable \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
-    trainer.project_name='verl_grpo_example_gsm8k' \
-    trainer.experiment_name="exact_veomni_qwen3_1b7" \
+    trainer.project_name='vexact_test' \
+    trainer.experiment_name="vexact_veomni_qwen3_1b7" \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \

@@ -1,11 +1,12 @@
 #!/bin/bash
 set -x
 export MODELING_BACKEND=hf
-# Model: DeepSeek-R1-Distill-Qwen-1.5B
-model_path=/mnt/hdfs/model_path
+
+# Model: Qwen3-1.7B
+model_path="${model_dir}"
 
 # Data: MATH (math_1460 train) / AIME 2024 + AIME 2025 (val)
-data_path=/mnt/hdfs/data_path
+data_path="${data_path}"
 
 # Register vexact rollout globally
 export VERL_USE_EXTERNAL_MODULES=vexact.integrations.verl.register
@@ -62,7 +63,7 @@ RAY_DEDUP_LOGS=0 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     custom_reward_function.path=examples/math_reward_model/math_grader.py \
     custom_reward_function.name=compute_math_score \
     trainer.project_name=dense-math \
-    trainer.experiment_name=sanity_test-GRPO-vexact \
+    trainer.experiment_name=vexact-github-test \
     trainer.use_legacy_worker_impl=disable \
     trainer.test_freq=50 \
     trainer.log_val_generations=20 \

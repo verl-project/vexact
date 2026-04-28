@@ -134,7 +134,7 @@ class VExactServer:
             SchedulerConfig,
             VeXactConfig,
         )
-        from vexact.engine import VExact
+        from vexact.engine import VeXact
 
         engine_kwargs = self.config.engine_kwargs.pop("vexact", {})
         logger.info(f"Extra {engine_kwargs=}")
@@ -171,7 +171,7 @@ class VExactServer:
             ),
         )
 
-        self.engine = VExact(vexact_config)
+        self.engine = VeXact(vexact_config)
         self.tokenizer = self.engine.tokenizer
 
         # Resolve eos_token_id from the model config (config.json), NOT the tokenizer.

@@ -79,3 +79,5 @@ logs/
 # vexact tests
 /verl
 inference_outputs*
+outputs/
+verl_rollout_profile_gsm8k
