@@ -13,9 +13,9 @@
 # limitations under the License.
 
 """
-Ray-based async server wrapping VExact for RL inference.
+Ray-based async server wrapping VeXact for RL inference.
 
-This provides a server interface using VExact as the underlying inference engine,
+This provides a server interface using VeXact as the underlying inference engine,
 following the vLLM async server interface pattern.
 """
 
@@ -42,10 +42,10 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-class VExactServer:
-    """VExact server in single node, following vLLMHttpServer interface pattern.
+class VeXactServer:
+    """VeXact server in single node, following vLLMHttpServer interface pattern.
 
-    This is equivalent to launching a VExact inference server with specified configuration.
+    This is equivalent to launching a VeXact inference server with specified configuration.
     """
 
     def __init__(
@@ -108,7 +108,7 @@ class VExactServer:
         self.tokenizer = None
 
         logger.info(
-            f"VExactServer initialized (replica_rank={replica_rank}, node_rank={node_rank}, "
+            f"VeXactServer initialized (replica_rank={replica_rank}, node_rank={node_rank}, "
             f"{get_visible_devices_keyword()}: {cuda_visible_devices}, "
             f"gpus_per_node={gpus_per_node}, nnodes={nnodes})"
         )
@@ -119,7 +119,7 @@ class VExactServer:
         return self._server_address, self._server_port
 
     async def launch_server(self, master_address: str = None, master_port: int = None):
-        """Launch the VExact engine.
+        """Launch the VeXact engine.
 
         Args:
             master_address: Master address for multi-node setup (unused for single-node).
@@ -189,10 +189,11 @@ class VExactServer:
                 f"Using model config value for generation stop condition."
             )
 
-        # VExact doesn't use network ports, set to 0
-        self._server_port = 0
+        # Use replica_rank as a synthetic port so verl's GlobalRequestLoadBalancer,
+        # which keys servers by `f"{address}:{port}"`, gives each replica a unique key.
+        self._server_port = self.replica_rank
 
-        logger.info(f"VExact server ready (replica_rank={self.replica_rank}, node_rank={self.node_rank})")
+        logger.info(f"VeXact server ready (replica_rank={self.replica_rank}, node_rank={self.node_rank})")
 
     async def generate(
         self,
@@ -207,7 +208,7 @@ class VExactServer:
         from vexact.core.request import DriverRequest
 
         if image_data is not None or video_data is not None:
-            logger.warning("image_data and video_data not supported by VExact, ignoring")
+            logger.warning("image_data and video_data not supported by VeXact, ignoring")
 
         max_possible_tokens = self.config.max_model_len - len(prompt_ids)
         if max_possible_tokens < 0:
@@ -272,7 +273,7 @@ class VExactServer:
         return TokenOutput(
             token_ids=token_ids,
             log_probs=log_probs,
-            routed_experts=None,  # VExact doesn't support routing replay
+            routed_experts=None,  # VeXact doesn't support routing replay
             stop_reason=stop_reason,
             num_preempted=None,
         )
@@ -306,11 +307,11 @@ class VExactServer:
         await loop.run_in_executor(None, self.engine.sleep)
 
     async def clear_kv_cache(self):
-        """Clear KV cache. VExact manages KV cache internally via scheduler."""
+        """Clear KV cache. VeXact manages KV cache internally via scheduler."""
         pass
 
     async def wait_for_requests_to_drain(self):
-        """Wait for all pending requests to complete. VExact processes requests synchronously."""
+        """Wait for all pending requests to complete. VeXact processes requests synchronously."""
         pass
 
     async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:  # noqa: ARG002
@@ -318,12 +319,12 @@ class VExactServer:
         return {"aborted_count": 0, "request_ids": []}
 
     async def resume_generation(self):
-        """Resume generation after abort_all_requests. No-op for VExact."""
+        """Resume generation after abort_all_requests. No-op for VeXact."""
         pass
 
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:  # noqa: ARG002
         """Abort a specific generation request."""
-        return {"aborted": False, "request_id": request_id, "error": "VExact doesn't support request abortion"}
+        return {"aborted": False, "request_id": request_id, "error": "VeXact doesn't support request abortion"}
 
     async def receive_weights(self):
         """Receive model weights via IPC on all workers."""
@@ -342,10 +343,10 @@ class VExactServer:
 _rollout_worker_actor_cls = ray.remote(ServerAdapter)
 
 
-class VExactReplica(RolloutReplica):
-    """VExact rollout replica extending RolloutReplica base class.
+class VeXactReplica(RolloutReplica):
+    """VeXact rollout replica extending RolloutReplica base class.
 
-    This class manages VExact servers across multiple nodes, following the vLLMReplica pattern.
+    This class manages VeXact servers across multiple nodes, following the vLLMReplica pattern.
     """
 
     def __init__(
@@ -357,7 +358,7 @@ class VExactReplica(RolloutReplica):
         is_reward_model: bool = False,
     ):
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
-        self.server_class = ray.remote(VExactServer)
+        self.server_class = ray.remote(VeXactServer)
 
     def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
         """Get rollout worker actor class for colocated and standalone mode."""
@@ -369,7 +370,7 @@ class VExactReplica(RolloutReplica):
         )
 
     async def launch_servers(self):
-        """Launch VExact server in each node."""
+        """Launch VeXact server in each node."""
         assert len(self.workers) == self.world_size, (
             f"worker number {len(self.workers)} not equal to world size {self.world_size}"
         )
