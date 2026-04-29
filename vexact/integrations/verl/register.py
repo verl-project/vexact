@@ -1,6 +1,6 @@
 # Copyright 2025 Bytedance Ltd. and/or its affiliates
 
-"""Register VExact rollout with VeRL framework.
+"""Register VeXact rollout with VeRL framework.
 
 Usage:
     Set environment variable before importing verl:
@@ -16,16 +16,16 @@ from verl.workers.rollout.replica import RolloutReplicaRegistry
 
 
 def _load_vexact_replica():
-    """Lazy loader for VExactReplica to avoid circular imports."""
-    from vexact.integrations.verl.async_server import VExactReplica
+    """Lazy loader for VeXactReplica to avoid circular imports."""
+    from vexact.integrations.verl.async_server import VeXactReplica
 
-    return VExactReplica
+    return VeXactReplica
 
 
-# Register VExact rollout replica (for server mode)
+# Register VeXact rollout replica (for server mode)
 RolloutReplicaRegistry.register("vexact", _load_vexact_replica)
 
-# Register VExact rollout base (for hybrid mode with device mesh)
+# Register VeXact rollout base (for hybrid mode with device mesh)
 _ROLLOUT_REGISTRY[("vexact", "async")] = "vexact.integrations.verl.rollout.ServerAdapter"
 
-print(f"[vexact] Registered VExact with VeRL at {__file__}")
+print(f"[vexact] Registered VeXact with VeRL at {__file__}")

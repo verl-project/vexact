@@ -444,7 +444,7 @@ def run_continuous_batching(args, tokenizer, generation_config):
         proc = subprocess.Popen(worker_cmd, env=env)
         processes.append(proc)
 
-    # Create VExactConfig from args
+    # Create VeXactConfig from args
     cache_kwargs = {}
     if args.max_cache_blocks is not None:
         cache_kwargs["max_cache_blocks"] = args.max_cache_blocks

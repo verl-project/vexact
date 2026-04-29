@@ -32,7 +32,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 class ServerAdapter(BaseRollout):
     """
-    VExact server adapter for async mode, serves as a client to request VExact server
+    VeXact server adapter for async mode, serves as a client to request VeXact server
     to resume/release/update_weights.
     """
 
@@ -119,5 +119,5 @@ class ServerAdapter(BaseRollout):
         """Sync generation no longer supported."""
         raise NotImplementedError(
             "ServerAdapter does not support synchronous generate_sequences(). "
-            "Use the async server interface via VExactReplica and VExactServer instead."
+            "Use the async server interface via VeXactReplica and VeXactServer instead."
         )
