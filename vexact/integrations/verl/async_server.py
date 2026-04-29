@@ -189,10 +189,8 @@ class VeXactServer:
                 f"Using model config value for generation stop condition."
             )
 
-        # VeXact has no network port, but verl's GlobalRequestLoadBalancer keys
-        # servers by `f"{address}:{port}"` and collapses duplicate keys into one
-        # entry — leaving 7/8 replicas idle. Use the replica_rank as a synthetic
-        # port so each replica registers with a unique address.
+        # Use replica_rank as a synthetic port so verl's GlobalRequestLoadBalancer,
+        # which keys servers by `f"{address}:{port}"`, gives each replica a unique key.
         self._server_port = self.replica_rank
 
         logger.info(f"VeXact server ready (replica_rank={self.replica_rank}, node_rank={self.node_rank})")
