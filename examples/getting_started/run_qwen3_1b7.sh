@@ -92,7 +92,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.veomni.optimizer_offload=True \
     algorithm.use_kl_in_reward=False \
     reward.reward_manager.name=dapo \
-    trainer.use_legacy_worker_impl=disable \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='vexact_test' \

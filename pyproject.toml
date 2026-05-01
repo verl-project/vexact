@@ -17,7 +17,8 @@ gpu = [
     "torchaudio",
     "flash-attn",
     "flash-attn-3",
-    "flash-attn-4>=4.0.0b9",
+    "flash-attn-4",
+    "quack-kernels==0.3.4",
     "nvidia-ml-py",
 ]
 dev = [
@@ -30,6 +31,12 @@ vllm = [
 ]
 verl = [
     "verl",
+    "uvicorn",
+    "fastapi",
+    "cachetools",
+]
+veomni = [
+    "veomni",
 ]
 
 [build-system]
@@ -105,6 +112,7 @@ lines-after-imports = 2
 known-first-party = [
   "verl",
   "vexact",
+  "veomni",
 ]
 
 known-third-party = [
@@ -116,6 +124,8 @@ known-third-party = [
 [tool.uv.sources]
 # verl = { git = "https://github.com/volcengine/verl.git", tag = "v0.7.1" }
 verl = { path = "./verl", editable = true }  # if you want to clone it and run locally for dev
+# To work on VeOmni locally, point this at `{ path = "../VeOmni", editable = true }`.
+veomni = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "0501a7bfab746f7341ca2df01d2c43d282d60bdc" }
 torch = [
     { index = "pytorch", extra = "gpu" },
 ]
@@ -123,7 +133,10 @@ torchvision = { index = "pytorch" }
 torchaudio = { index = "pytorch" }
 flash-attn = { url = "https://github.com/Luosuu/flash-attention3-wheels/releases/download/v0.0.2/flash_attn-2.8.4+cu129torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
 flash-attn-3 = { url = "https://github.com/windreamer/flash-attention3-wheels/releases/download/2026.03.16-4d76052/flash_attn_3-3.0.0+20260316.cu129torch2100cxx11abitrue.71bf77-cp39-abi3-linux_x86_64.whl" }
-# flash-attn-4 = { url = "" }
+# Pin to FA4 4.0.0b5: b7+ contains commits that break MLA bitwise alignment
+# (rollout_probs_diff_max regresses from 0 to ~0.18 on Moonlight). Needs
+# upstream investigation before we can bump.
+flash-attn-4 = { url = "https://files.pythonhosted.org/packages/7a/37/5b0128141da6faf03ec0cee1fc30061a3f50a3a4fcf6bc2a8bafa32e4cd2/flash_attn_4-4.0.0b5.tar.gz" }
 
 [[tool.uv.index]]
 name = "pytorch"
