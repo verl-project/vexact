@@ -3020,8 +3020,8 @@ wheels = [
 
 [[package]]
 name = "veomni"
-version = "0.1.9a2"
-source = { git = "https://github.com/ByteDance-Seed/VeOmni.git?rev=0501a7bfab746f7341ca2df01d2c43d282d60bdc#0501a7bfab746f7341ca2df01d2c43d282d60bdc" }
+version = "0.1.9a4"
+source = { git = "https://github.com/ByteDance-Seed/VeOmni.git?rev=9c041dbdac469f372b1b9373078d77771c64638f#9c041dbdac469f372b1b9373078d77771c64638f" }
 dependencies = [
     { name = "blobfile", marker = "sys_platform == 'linux'" },
     { name = "datasets", marker = "sys_platform == 'linux'" },
@@ -3120,7 +3120,7 @@ requires-dist = [
     { name = "torchvision", marker = "extra == 'gpu'", index = "https://download.pytorch.org/whl/cu129" },
     { name = "transformers" },
     { name = "uvicorn", marker = "extra == 'verl'" },
-    { name = "veomni", marker = "extra == 'veomni'", git = "https://github.com/ByteDance-Seed/VeOmni.git?rev=0501a7bfab746f7341ca2df01d2c43d282d60bdc" },
+    { name = "veomni", marker = "extra == 'veomni'", git = "https://github.com/ByteDance-Seed/VeOmni.git?rev=9c041dbdac469f372b1b9373078d77771c64638f" },
     { name = "verl", marker = "extra == 'verl'", git = "https://github.com/verl-project/verl.git?rev=61f29997fb026a5a269dafccfe2f3bb800e32ef4" },
     { name = "vllm", marker = "extra == 'vllm'", specifier = "==0.18.0" },
 ]
