@@ -7,7 +7,7 @@ Transformer-based bitwise-aligned rollout for VeOmni FSDP with VeRL integration.
 - 🎯 **Bitwise-aligned training & inference** — VeOmni FSDP actor and VeXact rollout engine produce identical logprobs for dense and MoE models with verl (the legacy FSDP engine is not supported for MoE models).
   - All the dense model should work out-of-the-box if they are not using ops that are different between training and inference like linear attention.
   - MoE models need to patch the model with Fused MoE kernel like our Qwen3-MoE and DeepSeek-V3 example.
-- ⚡ **Fast and aligned kernels** — Fused MoE, fused linear cross-entropy, Flash Attention with paged KV cache, all numerically consistent between training and inference
+- ⚡ **Fast and aligned kernels** — Fused MoE, fused linear cross-entropy, Flash Attention 3/4 with paged KV cache, all numerically consistent between training and inference
 - 🧩 **Simple model definitions** — Transformer model code is self-contained and easy to audit, so training and inference model definitions stay in sync
 - 📖 **Readable codebase** — Clean implementation with chunked prefill, pipeline parallelism, and CUDA graph support
 
