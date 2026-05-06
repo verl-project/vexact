@@ -17,15 +17,17 @@ examples/
 
 ## Recipe index
 
-| Recipe                               | Model                         | Dataset (train / val)                                                                          | Hardware | Algorithm     | Notes                               |
-| ------------------------------------ | ----------------------------- | ---------------------------------------------------------------------------------------------- | -------- | ------------- | ----------------------------------- |
-| `getting_started/run_qwen3_1b7.sh`   | Qwen3-1.7B (dense)            | gsm8k                                                                                          | 1× 8H100 | GRPO          | Smallest entry point                |
-| `moe/run_qwen3_30B_A3B_dapo.sh`      | Qwen3-30B-A3B                 | DAPO-Math-17k / AIME 2025                                                                      | 1× 8H100 | DAPO          | Long-context math RL (20k response) |
-| `moe/run_qwen3_30B_A3B_16H100.sh`    | Qwen3-30B-A3B                 | gsm8k                                                                                          | 2× 8H100 | GRPO          | Multi-node test                     |
-| `moe/run_qwen3_30B_A3B_8B200.sh`     | Qwen3-30B-A3B                 | gsm8k                                                                                          | 1× 8B200 | GRPO          | FA4 + fused_quack MoE kernel        |
-| `moe/run_qwen3_30B_A3B_reinforce.sh` | Qwen3-30B-A3B-Base            | DAPO-Math-17k / AIME 2024                                                                      | 8× 8H100 | REINFORCE++   | Algorithm diversity                 |
-| `verify/run_dense_vexact.sh`         | DeepSeek-R1-Distill-Qwen-1.5B | MATH ([math_1460](https://huggingface.co/datasets/sail/Sanity-Test-R1D-1.5B)) / AIME 2024+2025 | 1× 8H100 | GRPO (vexact) | Pair with the vllm one below        |
-| `verify/run_dense_vllm.sh`           | DeepSeek-R1-Distill-Qwen-1.5B | MATH ([math_1460](https://huggingface.co/datasets/sail/Sanity-Test-R1D-1.5B)) / AIME 2024+2025 | 1× 8H100 | GRPO (vllm)   | Baseline for determinism check      |
+| Recipe                               | Model                         | Dataset (train / val)                                                                          | Hardware | Algorithm     | Notes                                       |
+| ------------------------------------ | ----------------------------- | ---------------------------------------------------------------------------------------------- | -------- | ------------- | ------------------------------------------- |
+| `getting_started/run_qwen3_1b7.sh`   | Qwen3-1.7B (dense)            | gsm8k                                                                                          | 1× 8H100 | GRPO          | Smallest entry point                        |
+| `moe/run_qwen3_30B_A3B_dapo.sh`      | Qwen3-30B-A3B                 | DAPO-Math-17k / AIME 2025                                                                      | 1× 8H100 | DAPO          | Long-context math RL (20k response)         |
+| `moe/run_qwen3_30B_A3B_16H100.sh`    | Qwen3-30B-A3B                 | gsm8k                                                                                          | 2× 8H100 | GRPO          | Multi-node test                             |
+| `moe/run_qwen3_30B_A3B_8B200.sh`     | Qwen3-30B-A3B                 | gsm8k                                                                                          | 1× 8B200 | GRPO          | FA4 + fused_quack MoE kernel                |
+| `moe/run_qwen3_30B_A3B_reinforce.sh` | Qwen3-30B-A3B-Base            | DAPO-Math-17k / AIME 2024                                                                      | 8× 8H100 | REINFORCE++   | Algorithm diversity                         |
+| `moe/run_moonlight_gsm8k.sh`         | Moonlight-16B-A3B-Instruct    | gsm8k                                                                                          | 1× 8B200 | GRPO          | Fast-debug Moonlight (deepseek_v3 / MLA)    |
+| `moe/run_moonlight_reinforce.sh`     | Moonlight-16B-A3B-Instruct    | DAPO-Math-17k / AIME 2024                                                                      | 1× 8B200 | REINFORCE++   | REINFORCE++ on Moonlight (deepseek_v3 / MLA) |
+| `verify/run_dense_vexact.sh`         | DeepSeek-R1-Distill-Qwen-1.5B | MATH ([math_1460](https://huggingface.co/datasets/sail/Sanity-Test-R1D-1.5B)) / AIME 2024+2025 | 1× 8H100 | GRPO (vexact) | Pair with the vllm one below                |
+| `verify/run_dense_vllm.sh`           | DeepSeek-R1-Distill-Qwen-1.5B | MATH ([math_1460](https://huggingface.co/datasets/sail/Sanity-Test-R1D-1.5B)) / AIME 2024+2025 | 1× 8H100 | GRPO (vllm)   | Baseline for determinism check              |
 
 ## Running a recipe
 
@@ -49,7 +51,10 @@ bash examples/getting_started/run_qwen3_1b7.sh
 ```
 
 Datasets are expected in parquet format. See each recipe for the specific
-splits it loads.
+splits it loads. Env var names vary per recipe (e.g. `model_dir`/`data_dir`
+for the qwen3 scripts, `MODEL_PATH`/`DATA_PATH` for the Moonlight scripts) —
+the canonical invocation lives in the comment block at the top of each
+script.
 
 ### Picking an attention backend
 
