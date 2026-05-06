@@ -122,8 +122,8 @@ known-third-party = [
 ]
 
 [tool.uv.sources]
-# verl = { git = "https://github.com/volcengine/verl.git", tag = "v0.7.1" }
-verl = { path = "./verl", editable = true }  # if you want to clone it and run locally for dev
+verl = { git = "https://github.com/verl-project/verl.git", rev = "61f29997fb026a5a269dafccfe2f3bb800e32ef4" }
+# To work on verl locally, point this at `{ path = "./verl", editable = true }`.
 # To work on VeOmni locally, point this at `{ path = "../VeOmni", editable = true }`.
 veomni = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "0501a7bfab746f7341ca2df01d2c43d282d60bdc" }
 torch = [

@@ -3037,7 +3037,8 @@ dependencies = [
 
 [[package]]
 name = "verl"
-source = { editable = "verl" }
+version = "0.8.0.dev0"
+source = { git = "https://github.com/verl-project/verl.git?rev=61f29997fb026a5a269dafccfe2f3bb800e32ef4#61f29997fb026a5a269dafccfe2f3bb800e32ef4" }
 dependencies = [
     { name = "accelerate", marker = "sys_platform == 'linux'" },
     { name = "codetiming", marker = "sys_platform == 'linux'" },
@@ -3058,50 +3059,6 @@ dependencies = [
     { name = "transformers", marker = "sys_platform == 'linux'" },
     { name = "wandb", marker = "sys_platform == 'linux'" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "accelerate" },
-    { name = "codetiming" },
-    { name = "datasets" },
-    { name = "dill" },
-    { name = "flash-attn", marker = "extra == 'gpu'" },
-    { name = "hydra-core" },
-    { name = "liger-kernel", marker = "extra == 'gpu'" },
-    { name = "math-verify", marker = "extra == 'math'" },
-    { name = "mathruler", marker = "extra == 'geo'" },
-    { name = "mbridge", marker = "extra == 'mcore'" },
-    { name = "numpy", specifier = "<2.0.0" },
-    { name = "packaging", specifier = ">=20.0" },
-    { name = "pandas" },
-    { name = "peft" },
-    { name = "pre-commit", marker = "extra == 'test'" },
-    { name = "py-spy", marker = "extra == 'test'" },
-    { name = "pyarrow", specifier = ">=19.0.0" },
-    { name = "pybind11" },
-    { name = "pyext", marker = "extra == 'prime'" },
-    { name = "pylatexenc" },
-    { name = "pytest", marker = "extra == 'test'" },
-    { name = "pytest-asyncio", marker = "extra == 'test'" },
-    { name = "pytest-rerunfailures", marker = "extra == 'test'" },
-    { name = "qwen-vl-utils", marker = "extra == 'geo'" },
-    { name = "ray", extras = ["default"], specifier = ">=2.41.0" },
-    { name = "sglang", extras = ["openai", "srt"], marker = "extra == 'sglang'", specifier = "==0.5.8" },
-    { name = "tensorboard" },
-    { name = "tensordict", specifier = ">=0.8.0,!=0.9.0,<=0.10.0" },
-    { name = "tensordict", marker = "extra == 'sglang'", specifier = ">=0.8.0,!=0.9.0,<=0.10.0" },
-    { name = "tensordict", marker = "extra == 'vllm'", specifier = ">=0.8.0,!=0.9.0,<=0.10.0" },
-    { name = "tensorrt-llm", marker = "extra == 'trtllm'", specifier = ">=1.2.0rc6" },
-    { name = "torch", marker = "extra == 'sglang'", specifier = "==2.9.1" },
-    { name = "torchdata" },
-    { name = "torchvision", marker = "extra == 'geo'" },
-    { name = "transferqueue", marker = "extra == 'transferqueue'", specifier = "==0.1.6" },
-    { name = "transformers" },
-    { name = "trl", marker = "extra == 'trl'", specifier = "<=0.9.6" },
-    { name = "vllm", marker = "extra == 'vllm'", specifier = ">=0.8.5,<=0.12.0" },
-    { name = "wandb" },
-]
-provides-extras = ["test", "prime", "geo", "gpu", "math", "vllm", "sglang", "trl", "mcore", "trtllm", "transferqueue"]
 
 [[package]]
 name = "vexact"
@@ -3164,7 +3121,7 @@ requires-dist = [
     { name = "transformers" },
     { name = "uvicorn", marker = "extra == 'verl'" },
     { name = "veomni", marker = "extra == 'veomni'", git = "https://github.com/ByteDance-Seed/VeOmni.git?rev=0501a7bfab746f7341ca2df01d2c43d282d60bdc" },
-    { name = "verl", marker = "extra == 'verl'", editable = "verl" },
+    { name = "verl", marker = "extra == 'verl'", git = "https://github.com/verl-project/verl.git?rev=61f29997fb026a5a269dafccfe2f3bb800e32ef4" },
     { name = "vllm", marker = "extra == 'vllm'", specifier = "==0.18.0" },
 ]
 provides-extras = ["gpu", "dev", "vllm", "verl", "veomni"]
