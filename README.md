@@ -11,10 +11,45 @@ Transformer-based bitwise-aligned rollout for FSDP with VeRL integration.
 
 ## Installation
 
+VeXact uses [uv](https://docs.astral.sh/uv/) for environment management. Pick
+the extras that match your use case:
+
 ```bash
-# uv
-uv sync --extra gpu --extra dev
+# End-to-end RL training (verl trainer + VeOmni FSDP actor + VeXact rollout):
+uv sync --extra gpu --extra verl --extra veomni
+
+# Rollout-only (no trainer, no FSDP actor):
+uv sync --extra gpu
+
+# Add the dev extra (pytest, pre-commit) when contributing:
+uv sync --extra gpu --extra verl --extra veomni --extra dev
 ```
+
+What each extra does:
+
+- `gpu` — PyTorch (CUDA 12.9), FlashAttention 2/3/4, quack-kernels, NVML.
+- `verl` — pulls verl from `verl-project/verl` (pinned by commit in
+  `[tool.uv.sources]`) plus FastAPI/uvicorn/cachetools used by the trainer.
+- `veomni` — pulls VeOmni from `ByteDance-Seed/VeOmni` (pinned by commit).
+- `vllm` — vLLM 0.18 if you prefer it as the rollout engine instead of
+  VeXact's native one.
+- `dev` — `pytest`, `pytest-asyncio`, `pre-commit` for development.
+
+### Working on verl or VeOmni locally
+
+`verl` and `veomni` are pinned by git commit in `pyproject.toml`'s
+`[tool.uv.sources]` block, so contributors and CI all resolve to the same
+upstream. To hack on either upstream against your local checkout, swap the
+relevant entry to `editable = true` (the file has inline hints):
+
+```toml
+[tool.uv.sources]
+verl = { path = "./verl", editable = true }
+veomni = { path = "./VeOmni", editable = true }
+```
+
+Then `uv sync --extra gpu --extra verl --extra veomni` re-resolves the venv
+to your local tree.
 
 ## Components
 
