@@ -166,9 +166,7 @@ class Scheduler:
                 # _activate_request → commit_prefix_plan (no rehash) and later to
                 # mark_blocks_filled (also no rehash). Eliminates the triple-hash
                 # that the original peek/allocate/stamp paths had.
-                block_hashes, num_prefix_hit_blocks = self._kv_cache_manager.plan_prefix_cache(
-                    request.input_ids_list
-                )
+                block_hashes, num_prefix_hit_blocks = self._kv_cache_manager.plan_prefix_cache(request.input_ids_list)
                 cached_tokens = num_prefix_hit_blocks * self._kv_cache_manager.page_size
                 # Pass num_comp explicitly so we don't mutate the request before
                 # we know it'll be activated.
@@ -256,9 +254,7 @@ class Scheduler:
             # Prefill done. Stamp full blocks so concurrent / future requests with
             # the same prefix can hit the cache. `mark_blocks_filled` is idempotent
             # (O(1) fast-path on repeat calls), so we don't track a flag here.
-            self._kv_cache_manager.mark_blocks_filled(
-                request.block_ids, request.prefix_block_hashes
-            )
+            self._kv_cache_manager.mark_blocks_filled(request.block_ids, request.prefix_block_hashes)
 
             token_id = self._process_generated_token(request, token_tensor, logits, logprobs)
 

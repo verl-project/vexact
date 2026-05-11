@@ -194,9 +194,7 @@ class KVCacheManager:
 
         # refcount[bid] == 0 ⇔ bid in free_lru. Both kept in sync by _incref/_decref.
         self._refcount: dict[int, int] = {bid: 0 for bid in range(self._max_blocks)}
-        self._free_lru: OrderedDict[int, None] = OrderedDict(
-            (bid, None) for bid in range(self._max_blocks)
-        )
+        self._free_lru: OrderedDict[int, None] = OrderedDict((bid, None) for bid in range(self._max_blocks))
 
         # Content-addressed prefix cache: chain hash → block_id. Only populated for
         # full blocks (covering exactly page_size tokens) after their request has

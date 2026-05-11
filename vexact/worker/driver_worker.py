@@ -38,8 +38,7 @@ class DriverWorker(Worker):
         # VEXACT_DISABLE_PREFIX_CACHE=1 is a debug escape hatch — useful for
         # measuring the cache's contribution by running the same workload twice.
         enable_prefix_cache = (
-            config.parallel.pipeline_parallel_size == 1
-            and os.environ.get("VEXACT_DISABLE_PREFIX_CACHE", "") != "1"
+            config.parallel.pipeline_parallel_size == 1 and os.environ.get("VEXACT_DISABLE_PREFIX_CACHE", "") != "1"
         )
         self.kv_cache_manager = KVCacheManager(config.cache, enable_prefix_cache=enable_prefix_cache)
         self.scheduler = Scheduler(

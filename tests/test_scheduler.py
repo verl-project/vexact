@@ -277,9 +277,7 @@ def test_scheduler_update_processes_outputs_and_finishes_requests(kv_cache_manag
 
     # Prepare requests by allocating KV cache and setting up state
     for request in infer_requests:
-        block_hashes, num_prefix_hit_blocks = scheduler._kv_cache_manager.plan_prefix_cache(
-            request.input_ids_list
-        )
+        block_hashes, num_prefix_hit_blocks = scheduler._kv_cache_manager.plan_prefix_cache(request.input_ids_list)
         scheduler._activate_request(request, block_hashes, num_prefix_hit_blocks)
         # Simulate that prefill is already complete so update() takes the decode path.
         # _activate_request sets num_computed_tokens to the cache-derived value (0
