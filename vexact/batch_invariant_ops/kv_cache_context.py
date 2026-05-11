@@ -20,6 +20,7 @@ to flex_attention, enabling efficient paged attention with block-based cache man
 """
 
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -139,82 +140,278 @@ def has_kv_cache_context() -> bool:
 
 
 class KVCacheManager:
-    """
-    KV Cache Manager for continuous batching with flex_attention support
+    """KV cache manager with optional content-addressed prefix cache.
 
-    This class manages block-based KV cache allocation and provides utilities
-    for setting up the context needed by flex_attention.
+    Two responsibilities:
+      1. Block lifetime via reference counting. Free blocks live in an LRU queue
+         (least-recently-released first) and are reclaimed for new content when
+         the pool runs out.
+      2. Prefix cache via chained block-content hashing. When `prefix_cache_enabled`
+         is True, the scheduler calls `plan_prefix_cache` per request to compute
+         per-full-block chain hashes and the leading hit count. After prefill
+         completes, `mark_blocks_filled` stamps the just-computed hashes onto the
+         allocated blocks so future requests with the same prefix can hit them.
+
+    Lifecycle of a cached block:
+      A) plan_prefix_cache(token_ids) → (block_hashes, num_prefix_hit_blocks)
+      B) commit_prefix_plan(block_hashes, num_prefix_hit_blocks, total_tokens) →
+         incref hit blocks; take fresh blocks (LRU-oldest, evicting their old
+         hash if any) for the remaining full blocks and the partial last block
+      C) prefill completes → mark_blocks_filled(block_ids, block_hashes) stamps
+         the full blocks (idempotent — safe to call every decode step)
+      D) request finishes / preempts → free_blocks → decref; if 0 → push to free_lru
+         (block KEEPS its hash association — still cache-eligible until evicted)
+      E) future allocation runs out of fresh-tagged blocks → pops oldest from free_lru,
+         drops its hash entry from the index → block becomes fresh again
+
+    Invalidation: `clear_cache_index()` drops all hash entries (refcounts / free_lru
+    untouched). It is the caller's responsibility to also preempt every in-flight
+    request that owns blocks under the old KV state — those blocks' KV is stale
+    and decode would read garbage. See `Scheduler.reset_for_state_change()`.
+
+    For pp_size > 1 set prefix_cache_enabled=False — KV is replicated across PP
+    ranks but only this driver-side manager hashes; coordinating cache state across
+    ranks is out of scope.
     """
 
-    def __init__(self, cache_config):
+    # Constant seed for the chain hash. Doesn't need cryptographic strength —
+    # the chain lives within a single process and Python's int hash is fine for
+    # 1024-block scale (collision probability ~3e-14).
+    _SEED: int = 0
+
+    def __init__(self, cache_config, enable_prefix_cache: bool = True):
         """
-        Initialize KV cache manager.
-
         Args:
             cache_config: CacheConfig from vexact.config
+            enable_prefix_cache: when True, full blocks are hashed for content-addressed
+                reuse across requests. When False, behaves like the original allocator
+                (always fresh blocks, no lookups). Set False for pp_size > 1.
         """
         self.cache_config = cache_config
+        self.page_size: int = cache_config.page_size
+        self.prefix_cache_enabled: bool = enable_prefix_cache
+        self._max_blocks = cache_config.max_cache_blocks
 
-        # Block allocation tracking
-        self.allocated_blocks = set()
-        self.free_blocks_set = set(range(cache_config.max_cache_blocks))
+        # refcount[bid] == 0 ⇔ bid in free_lru. Both kept in sync by _incref/_decref.
+        self._refcount: dict[int, int] = {bid: 0 for bid in range(self._max_blocks)}
+        self._free_lru: OrderedDict[int, None] = OrderedDict(
+            (bid, None) for bid in range(self._max_blocks)
+        )
+
+        # Content-addressed prefix cache: chain hash → block_id. Only populated for
+        # full blocks (covering exactly page_size tokens) after their request has
+        # finished prefill. Both maps are cleared together (a block is either in
+        # both or neither).
+        self._block_hash_to_id: dict[int, int] = {}
+        self._block_id_to_hash: dict[int, int] = {}
+
+    # ---- diagnostics ----
+
+    def num_free_blocks(self) -> int:
+        return len(self._free_lru)
+
+    def num_allocated_blocks(self) -> int:
+        return self._max_blocks - len(self._free_lru)
+
+    def num_cached_blocks(self) -> int:
+        """Blocks currently registered in the prefix cache index (in-use OR free-but-cached)."""
+        return len(self._block_hash_to_id)
 
     def _num_blocks_needed(self, num_tokens: int) -> int:
-        """
-        Calculate the number of KV cache blocks needed for a given number of tokens.
+        return (num_tokens + self.page_size - 1) // self.page_size
 
-        Args:
-            num_tokens: Total number of tokens (e.g., max_length from generation config)
+    # ---- low-level ref / pool management ----
 
-        Returns:
-            Number of blocks required
-        """
-        return (num_tokens + self.cache_config.page_size - 1) // self.cache_config.page_size
+    def _incref(self, block_id: int) -> None:
+        if self._refcount[block_id] == 0:
+            self._free_lru.pop(block_id, None)
+        self._refcount[block_id] += 1
+
+    def _decref(self, block_id: int) -> None:
+        self._refcount[block_id] -= 1
+        if self._refcount[block_id] == 0:
+            # Push as MOST recently freed (last). _take_free_block pops from front (oldest).
+            self._free_lru[block_id] = None
+
+    def _take_free_block(self) -> Optional[int]:
+        """Pop the LRU-oldest free block; if it carried a cache hash, evict it first."""
+        if not self._free_lru:
+            return None
+        bid = next(iter(self._free_lru))
+        del self._free_lru[bid]
+        old_hash = self._block_id_to_hash.pop(bid, None)
+        if old_hash is not None:
+            # Defensive: only delete if it still maps back to us (it should).
+            if self._block_hash_to_id.get(old_hash) == bid:
+                del self._block_hash_to_id[old_hash]
+        return bid
+
+    def _rollback(self, block_ids: list[int]) -> None:
+        for bid in block_ids:
+            self._decref(bid)
+
+    # ---- public allocation paths ----
 
     def allocate_blocks(self, total_tokens: int, num_current_blocks: int = 0) -> list[int] | None:
-        """
-        Ensure KV cache coverage for total_tokens given num_current_blocks already allocated.
+        """Incremental allocation for an already-active request.
 
-        Args:
-            total_tokens: Total number of tokens that need block coverage
-            num_current_blocks: Number of blocks already allocated for this request
+        Used by the scheduler during decode and chunked-prefill steps to extend
+        block coverage as num_computed_tokens grows. New blocks are taken fresh
+        from the free pool — no prefix lookup, no stamping (decode tokens are
+        unique to this request and would never hit the cache anyway).
 
-        Returns:
-            List of newly allocated block IDs (may be empty if already sufficient),
-            or None if not enough free blocks (OOM).
+        Returns newly allocated block IDs (possibly empty), or None on OOM.
         """
         num_needed = self._num_blocks_needed(total_tokens)
         delta = num_needed - num_current_blocks
-
         if delta <= 0:
             return []
-
-        if len(self.free_blocks_set) < delta:
+        if len(self._free_lru) < delta:
             return None
-
-        allocated = []
+        allocated: list[int] = []
         for _ in range(delta):
-            block_id = min(self.free_blocks_set)
-            self.free_blocks_set.remove(block_id)
-            self.allocated_blocks.add(block_id)
-            allocated.append(block_id)
-
+            bid = self._take_free_block()
+            assert bid is not None  # checked above
+            self._incref(bid)
+            allocated.append(bid)
         return allocated
 
-    def num_free_blocks(self) -> int:
-        """Return the number of free KV cache blocks."""
-        return len(self.free_blocks_set)
+    def plan_prefix_cache(self, token_ids: list[int]) -> tuple[list[int], int]:
+        """Compute the prefix-cache plan for a token sequence. Stateless — no allocation.
 
-    def num_allocated_blocks(self) -> int:
-        """Return the number of allocated KV cache blocks."""
-        return len(self.allocated_blocks)
+        For each FULL block (last partial excluded) compute the chained hash and
+        check whether it's currently in the cache index. The "hit" run stops at
+        the first miss — a later "hit" would still require prefill to fill the
+        gap, which would overwrite the cached blocks, so we don't try to exploit it.
+
+        Returns (block_hashes, num_prefix_hit_blocks):
+          - block_hashes: one chain hash per full block (`len(token_ids) // page_size`
+            entries). Empty when prefix cache is disabled.
+          - num_prefix_hit_blocks: length of the leading contiguous hit run.
+
+        The scheduler reuses block_hashes verbatim in `commit_prefix_plan` and
+        `mark_blocks_filled` — neither recomputes hashes.
+        """
+        if not self.prefix_cache_enabled:
+            return [], 0
+
+        page_size = self.page_size
+        num_full = len(token_ids) // page_size
+        block_hashes: list[int] = []
+        num_prefix_hit_blocks = 0
+        contiguous = True
+        prev_hash = self._SEED
+
+        for i in range(num_full):
+            block_hash = hash((prev_hash, tuple(token_ids[i * page_size : (i + 1) * page_size])))
+            block_hashes.append(block_hash)
+            if contiguous and block_hash in self._block_hash_to_id:
+                num_prefix_hit_blocks += 1
+            else:
+                contiguous = False
+            prev_hash = block_hash
+
+        return block_hashes, num_prefix_hit_blocks
+
+    def commit_prefix_plan(
+        self,
+        block_hashes: list[int],
+        num_prefix_hit_blocks: int,
+        total_tokens: int,
+    ) -> list[int] | None:
+        """Commit a plan from `plan_prefix_cache`: incref hit blocks, take fresh for the rest.
+
+        Single-threaded scheduler ⇒ cache state can't change between plan and commit,
+        so the leading `num_prefix_hit_blocks` lookups via `_block_hash_to_id` are
+        guaranteed to hit (the chain hash is unique to the content).
+
+        Args:
+            block_hashes: hashes from plan_prefix_cache (one per full block). May be
+                empty when prefix cache is disabled or `total_tokens < page_size`.
+            num_prefix_hit_blocks: leading hits from plan_prefix_cache.
+            total_tokens: total tokens this request needs coverage for. Determines
+                whether a partial last block is needed (always fresh).
+
+        Returns the full block_ids list on success, or None on OOM (with full rollback).
+        """
+        num_blocks_needed = self._num_blocks_needed(total_tokens)
+        if num_blocks_needed == 0:
+            return []
+
+        block_ids: list[int] = []
+
+        # Cached portion: refcount existing blocks. Guaranteed to hit per the
+        # single-threaded plan/commit invariant.
+        for i in range(num_prefix_hit_blocks):
+            cached_bid = self._block_hash_to_id[block_hashes[i]]
+            self._incref(cached_bid)
+            block_ids.append(cached_bid)
+
+        # Remaining full blocks (cache misses) plus the partial last block: fresh from pool.
+        for _ in range(num_prefix_hit_blocks, num_blocks_needed):
+            bid = self._take_free_block()
+            if bid is None:
+                self._rollback(block_ids)
+                return None
+            self._incref(bid)
+            block_ids.append(bid)
+
+        return block_ids
 
     def free_blocks(self, block_ids: list[int]):
-        """Free allocated blocks"""
-        for block_id in block_ids:
-            if block_id in self.allocated_blocks:
-                self.allocated_blocks.remove(block_id)
-                self.free_blocks_set.add(block_id)
+        """Decref the given blocks; those reaching zero rejoin free_lru (still hashed)."""
+        for bid in block_ids:
+            if self._refcount.get(bid, 0) > 0:
+                self._decref(bid)
+
+    # ---- prefix cache management ----
+
+    def mark_blocks_filled(self, block_ids: list[int], block_hashes: list[int]) -> None:
+        """Stamp full blocks with the chain hashes computed by `plan_prefix_cache`.
+
+        Called every decode step (and once at prefill completion) — the fast-path
+        check on the last full block (which is the last to be stamped, and refcounted
+        by us so no one else can rewrite it) makes repeat calls O(1).
+
+        Why the partial last block is never stamped (intentional, not just an omission):
+          1. Chain hash is sensitive to tuple length: `hash((prev, tuple(partial)))`
+             differs from `hash((prev, tuple(full)))`, so a future longer request
+             couldn't hit a partial-stamped block anyway.
+          2. The partial slot keeps being written by decode, so any stamp written
+             at prefill completion would go stale the next decode step.
+
+        Hash collisions and re-stamping of already-stamped blocks are both safe:
+          - same content → same hash → no-op write
+          - true collision → last-writer-wins; the displaced entry's defensive
+            cleanup in `_take_free_block` keeps `_block_hash_to_id` consistent
+            on eviction.
+        """
+        if not block_hashes:
+            return
+        # Fast path: stamping is atomic per request, so if the last full block
+        # is already stamped with our hash, all earlier ones are too. The
+        # request owns these blocks (refcount > 0), so eviction can't clobber.
+        last_bid = block_ids[len(block_hashes) - 1]
+        if self._block_id_to_hash.get(last_bid) == block_hashes[-1]:
+            return
+        for bid, block_hash in zip(block_ids, block_hashes):
+            self._block_hash_to_id[block_hash] = bid
+            self._block_id_to_hash[bid] = block_hash
+
+    def clear_cache_index(self) -> None:
+        """Drop all prefix-cache hash entries.
+
+        Called on weight update or memory-saver sleep — the KV in cached blocks is
+        no longer correct under the new weights / restored memory, so future requests
+        must not hit them.
+
+        DOES NOT preempt in-flight requests. Active requests still hold refcounts
+        on blocks whose KV is now stale; their decode would read garbage if they
+        continued. Caller is responsible for preempting them first — see
+        `Scheduler.reset_for_state_change()`.
+        """
+        self._block_hash_to_id.clear()
+        self._block_id_to_hash.clear()
 
 
 class KVCacheStore:

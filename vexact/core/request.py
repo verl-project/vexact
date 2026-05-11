@@ -55,6 +55,12 @@ class InferenceRequest:
 
     block_ids: list[int] = field(default_factory=list)
 
+    # Chain hashes for each FULL block of input_ids_list, populated by the
+    # scheduler at activation via plan_prefix_cache. Reused by mark_blocks_filled
+    # so no module recomputes hashes. Reset on preempt — input_ids_list grows to
+    # include generated tokens, so the chain must be replanned on reactivation.
+    prefix_block_hashes: list[int] = field(default_factory=list)
+
     # State: Outputs
     generated_tokens: list[int] = field(default_factory=list)
     generated_logits: list[torch.Tensor] = field(default_factory=list)  # Store logits for each token
@@ -137,6 +143,7 @@ class InferenceRequest:
         self.block_ids = []
         self.num_computed_tokens = 0
         self.tokens_this_step = 0
+        self.prefix_block_hashes = []
         self.status = RequestStatus.PENDING
 
     def finish(self):

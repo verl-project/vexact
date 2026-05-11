@@ -108,7 +108,7 @@ def _load_sharegpt_samples(
     return samples if wants_all else samples[:num_requests]
 
 
-async def _run_test(vexact_engine, samples, timeout_s: float | None):
+async def _run_test(vexact_engine, samples, timeout_s: float | None, system_prompt_ids: list[int] | None = None):
     total_prompt_tokens = 0
     total_output_tokens = 0
     latencies = []
@@ -120,6 +120,8 @@ async def _run_test(vexact_engine, samples, timeout_s: float | None):
         prompt = sample.prompt
         try:
             input_ids = vexact_engine.tokenizer.encode(prompt, add_special_tokens=True)
+            if system_prompt_ids:
+                input_ids = list(system_prompt_ids) + input_ids
             gen_config = GenerationConfig(
                 max_new_tokens=sample.expected_output_len,
                 max_length=vexact_engine.config.model.max_model_len,
@@ -150,6 +152,21 @@ async def _run_test(vexact_engine, samples, timeout_s: float | None):
     return total_prompt_tokens, total_output_tokens, latencies, errors, completed, total_time
 
 
+def _build_synthetic_system_prompt(tokenizer, target_len: int) -> list[int]:
+    """Build a deterministic token-id sequence of exactly target_len tokens.
+
+    Used by --system-prompt-len to prepend a shared prefix to every request so
+    a prefix-cache implementation can be exercised. We tile a fixed instruction
+    string and truncate; exact text doesn't matter since cache hits are by
+    token-id match.
+    """
+    base = "You are a helpful assistant. Follow the user's instructions carefully and answer concisely. "
+    ids: list[int] = []
+    while len(ids) < target_len:
+        ids.extend(tokenizer.encode(base, add_special_tokens=False))
+    return ids[:target_len]
+
+
 def run_throughput(
     vexact_engine,
     total_requests: int | None,
@@ -157,6 +174,7 @@ def run_throughput(
     dataset_path: str,
     timeout_s: float | None,
     include_multimodal: bool = False,
+    system_prompt_len: int = 0,
 ):
     tokenizer = vexact_engine.tokenizer
     samples = _load_sharegpt_samples(
@@ -167,10 +185,12 @@ def run_throughput(
         include_multimodal=include_multimodal,
     )
 
-    total_prompt_tokens, total_output_tokens, latencies, errors, completed, total_time = asyncio.run(
-        _run_test(vexact_engine, samples, timeout_s)
-    )
-    return total_prompt_tokens, total_output_tokens, latencies, errors, completed, total_time
+    system_prompt_ids: list[int] | None = None
+    if system_prompt_len > 0:
+        system_prompt_ids = _build_synthetic_system_prompt(tokenizer, system_prompt_len)
+        print(f"Prepending {system_prompt_len}-token shared prefix to every request")
+
+    return asyncio.run(_run_test(vexact_engine, samples, timeout_s, system_prompt_ids=system_prompt_ids))
 
 
 def _parse_args():
@@ -252,6 +272,13 @@ def _parse_args():
         default=0,
         help="Number of steps to profile (0 = until manually stopped, default: 0).",
     )
+    parser.add_argument(
+        "--system-prompt-len",
+        type=int,
+        default=0,
+        help="If > 0, prepend a deterministic shared prefix of this many tokens to "
+        "every request. Useful for measuring prefix-cache hit benefit.",
+    )
     return parser.parse_args()
 
 
@@ -281,7 +308,10 @@ def main():
             dataset_path=args.dataset_path,
             timeout_s=args.timeout_s,
             include_multimodal=args.include_multimodal,
+            system_prompt_len=args.system_prompt_len,
         )
+        # Snapshot before close() — stats live in the worker process.
+        prefix_cache_stats = engine.get_prefix_cache_stats()
     finally:
         engine.close()
 
@@ -310,6 +340,19 @@ def main():
     print(f"Avg latency: {avg_latency:.3f}s")
     print(f"P50 latency: {p50:.3f}s")
     print(f"P95 latency: {p95:.3f}s")
+    if args.system_prompt_len > 0:
+        print(f"Shared prefix: {args.system_prompt_len} tokens prepended to every request")
+    if prefix_cache_stats.get("prefix_cache_enabled"):
+        hit = prefix_cache_stats["hit_tokens"]
+        miss = prefix_cache_stats["miss_tokens"]
+        ratio = prefix_cache_stats["hit_ratio"]
+        print(
+            f"Prefix cache: {hit}/{hit + miss} tokens hit ({ratio * 100:.1f}%), "
+            f"cached_blocks={prefix_cache_stats['cached_blocks']}, "
+            f"free_blocks={prefix_cache_stats['free_blocks']}"
+        )
+    else:
+        print("Prefix cache: disabled")
 
 
 if __name__ == "__main__":

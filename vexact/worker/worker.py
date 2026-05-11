@@ -159,6 +159,11 @@ class Worker(WorkerBase):
         receiver = BucketedWeightReceiver(zmq_handle=self.zmq_handle, device=self.device)
         receiver.receive_weights(on_bucket_received=lambda weights: self.load_state_dict(dict(weights)))
 
+    def get_prefix_cache_stats(self) -> dict:
+        # Non-driver ranks don't own a scheduler or KVCacheManager. Returning a
+        # disabled marker keeps the collective RPC well-formed across all ranks.
+        return {"prefix_cache_enabled": False}
+
 
 def run_worker(config: VeXactConfig, rank: int):
     """Run a worker (blocking)."""
