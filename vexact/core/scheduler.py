@@ -71,7 +71,9 @@ class Scheduler:
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.total_requests = 0
         self._kv_cache_manager = kv_cache_manager
-        # Prefix-cache stats (per Scheduler lifetime). Useful to confirm hits.
+        # Lifetime prefix-cache stats. Never reset — get_prefix_cache_stats reports
+        # the cumulative hit ratio since engine start, which gives a stable trend
+        # line across weight updates rather than a jittery per-step ratio.
         self.cache_hit_tokens_total = 0
         self.cache_miss_tokens_total = 0
 
@@ -341,32 +343,6 @@ class Scheduler:
         request.preempt()
         self._active_requests.pop(request.request_id, None)
         self._request_queue.put(request)
-
-    def reset_for_state_change(self) -> None:
-        """Drop all KV-dependent state ahead of a weight update or memory-saver sleep.
-
-        After this returns, the cache index is empty and every previously active
-        request has been preempted back to the queue with reset state — fresh
-        prefill under the new weights / restored memory. Lifetime hit/miss stats
-        are also reset so the post-change hit-ratio reflects the new run.
-
-        Why preempt: blocks held by active requests carry KV computed under the
-        OLD weights. Continuing decode against those blocks reads stale KV. The
-        only safe move is to free them and re-prefill from scratch.
-        """
-        for batch in self._inflight_batches:
-            for request in list(batch.active_requests.values()):
-                self._kv_cache_manager.free_blocks(request.block_ids)
-                request.preempt()
-                self._request_queue.put(request)
-            batch.active_requests.clear()
-
-        self._kv_cache_manager.clear_cache_index()
-
-        # Reset lifetime stats so post-reset hit-ratio isn't polluted by hits
-        # against the previous model's KV.
-        self.cache_hit_tokens_total = 0
-        self.cache_miss_tokens_total = 0
 
     def _finalize_request(self, request: InferenceRequest) -> None:
         """Finalize a completed request: mark finished, release KV blocks, and remove from active set."""

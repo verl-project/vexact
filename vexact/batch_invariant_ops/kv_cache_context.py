@@ -165,9 +165,10 @@ class KVCacheManager:
          drops its hash entry from the index → block becomes fresh again
 
     Invalidation: `clear_cache_index()` drops all hash entries (refcounts / free_lru
-    untouched). It is the caller's responsibility to also preempt every in-flight
-    request that owns blocks under the old KV state — those blocks' KV is stale
-    and decode would read garbage. See `Scheduler.reset_for_state_change()`.
+    untouched). Caller (the engine, on weight update / sleep) must ensure there
+    are no in-flight requests at that moment — those would own blocks whose KV
+    is now stale, and continuing decode against them would read garbage. The
+    expected protocol is "drain → clear → swap" handled at the framework layer.
 
     For pp_size > 1 set prefix_cache_enabled=False — KV is replicated across PP
     ranks but only this driver-side manager hashes; coordinating cache state across
@@ -400,13 +401,15 @@ class KVCacheManager:
         """Drop all prefix-cache hash entries.
 
         Called on weight update or memory-saver sleep — the KV in cached blocks is
-        no longer correct under the new weights / restored memory, so future requests
-        must not hit them.
+        no longer correct under the new weights / restored memory, so future
+        requests must not hit them.
 
-        DOES NOT preempt in-flight requests. Active requests still hold refcounts
-        on blocks whose KV is now stale; their decode would read garbage if they
-        continued. Caller is responsible for preempting them first — see
-        `Scheduler.reset_for_state_change()`.
+        DOES NOT preempt in-flight requests. The contract is that the engine
+        framework (e.g. verl) drains all in-flight requests before triggering a
+        weight update / sleep, so at the moment this is called there's nothing
+        to preempt. If called with active requests present, their decode will
+        continue reading stale KV — that's a framework-level bug, not handled
+        here.
         """
         self._block_hash_to_id.clear()
         self._block_id_to_hash.clear()

@@ -58,35 +58,35 @@ class DriverWorker(Worker):
     def receive_weights(self):
         """Receive new model weights.
 
-        Active requests are preempted (their KV is stale under the new weights
-        and decode would read garbage) and the prefix cache index is dropped.
-        Re-prefill happens automatically on the next schedule().
+        Drops the prefix cache index so future requests can't hit KV computed
+        under the old weights. Assumes the caller (e.g. verl) has already
+        drained all in-flight requests — we don't preempt anything here.
         """
-        self.scheduler.reset_for_state_change()
+        self.kv_cache_manager.clear_cache_index()
         super().receive_weights()
 
     def sleep(self, tag: str = None):
         """Pause memory-saving regions.
 
         The KV cache region is allocated with enable_cpu_backup=False, so its
-        bytes are dropped on sleep — any active block IDs become invalid. Active
-        requests are preempted; the prefix cache index is dropped.
+        bytes are dropped on sleep. The prefix cache index is dropped so the
+        post-wake_up engine can't hit blocks whose bytes are gone. Caller is
+        expected to have drained in-flight requests first.
         """
-        self.scheduler.reset_for_state_change()
+        self.kv_cache_manager.clear_cache_index()
         super().sleep(tag=tag)
 
     def load_state_dict(self, state_dict):
         """In-process weight load (e.g. tests). Same staleness as receive_weights()."""
-        self.scheduler.reset_for_state_change()
+        self.kv_cache_manager.clear_cache_index()
         super().load_state_dict(state_dict)
 
     def get_prefix_cache_stats(self) -> dict:
-        """Snapshot prefix-cache counters since process start (or last state reset).
+        """Snapshot prefix-cache counters since process start (lifetime).
 
         hit_tokens / miss_tokens are summed across every activated request; the
         ratio is hit_tokens / (hit_tokens + miss_tokens), guarded against div0.
-        Counters are reset on weight update / sleep so the ratio always reflects
-        the current model.
+        Counters are never reset, so the ratio is a stable lifetime trend line.
         """
         hit = self.scheduler.cache_hit_tokens_total
         miss = self.scheduler.cache_miss_tokens_total
