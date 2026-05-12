@@ -277,7 +277,8 @@ def test_scheduler_update_processes_outputs_and_finishes_requests(kv_cache_manag
 
     # Prepare requests by allocating KV cache and setting up state
     for request in infer_requests:
-        block_hashes, num_prefix_hit_blocks = scheduler._kv_cache_manager.plan_prefix_cache(request.input_ids_list)
+        block_hashes = scheduler._kv_cache_manager.compute_block_hashes(request.input_ids_list)
+        num_prefix_hit_blocks = scheduler._kv_cache_manager.count_prefix_hits(block_hashes)
         scheduler._activate_request(request, block_hashes, num_prefix_hit_blocks)
         # Simulate that prefill is already complete so update() takes the decode path.
         # _activate_request sets num_computed_tokens to the cache-derived value (0
@@ -461,7 +462,8 @@ def test_scheduler_preempted_request_folds_back_generated_tokens(kv_cache_manage
     req = InferenceRequest(request_id="req-preempt", generation_config=gen_config, input_ids_list=[10, 20, 30])
 
     # Set up request as if it had been running and generated 2 tokens
-    block_hashes, num_prefix_hit_blocks = scheduler._kv_cache_manager.plan_prefix_cache(req.input_ids_list)
+    block_hashes = scheduler._kv_cache_manager.compute_block_hashes(req.input_ids_list)
+    num_prefix_hit_blocks = scheduler._kv_cache_manager.count_prefix_hits(block_hashes)
     scheduler._activate_request(req, block_hashes, num_prefix_hit_blocks)
     req.generated_tokens = [40, 50]
     req.generated_logprobs = [0.1, 0.2]

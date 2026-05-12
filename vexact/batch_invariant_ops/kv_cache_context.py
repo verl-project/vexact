@@ -147,13 +147,15 @@ class KVCacheManager:
          (least-recently-released first) and are reclaimed for new content when
          the pool runs out.
       2. Prefix cache via chained block-content hashing. When `prefix_cache_enabled`
-         is True, the scheduler calls `plan_prefix_cache` per request to compute
-         per-full-block chain hashes and the leading hit count. After prefill
-         completes, `mark_blocks_filled` stamps the just-computed hashes onto the
-         allocated blocks so future requests with the same prefix can hit them.
+         is True, the scheduler calls `compute_block_hashes` once per request
+         (deterministic, cached on the request) and `count_prefix_hits` every
+         scheduling iteration (cheap, depends on current cache state). After
+         prefill completes, `mark_blocks_filled` stamps the just-computed hashes
+         onto the allocated blocks so future requests with the same prefix hit.
 
     Lifecycle of a cached block:
-      A) plan_prefix_cache(token_ids) → (block_hashes, num_prefix_hit_blocks)
+      A) compute_block_hashes(token_ids) → block_hashes
+         count_prefix_hits(block_hashes) → num_prefix_hit_blocks
       B) commit_prefix_plan(block_hashes, num_prefix_hit_blocks, total_tokens) →
          incref hit blocks; take fresh blocks (LRU-oldest, evicting their old
          hash if any) for the remaining full blocks and the partial last block
@@ -275,42 +277,41 @@ class KVCacheManager:
             allocated.append(bid)
         return allocated
 
-    def plan_prefix_cache(self, token_ids: list[int]) -> tuple[list[int], int]:
-        """Compute the prefix-cache plan for a token sequence. Stateless — no allocation.
+    def compute_block_hashes(self, token_ids: list[int]) -> list[int]:
+        """Chain hashes for all FULL blocks of `token_ids`. Stateless, deterministic.
 
-        For each FULL block (last partial excluded) compute the chained hash and
-        check whether it's currently in the cache index. The "hit" run stops at
-        the first miss — a later "hit" would still require prefill to fill the
-        gap, which would overwrite the cached blocks, so we don't try to exploit it.
+        Result is purely a function of (token_ids, page_size, _SEED) — does not
+        consult the cache index. The scheduler caches the result on the request
+        so requeued requests don't pay this cost every iteration.
 
-        Returns (block_hashes, num_prefix_hit_blocks):
-          - block_hashes: one chain hash per full block (`len(token_ids) // page_size`
-            entries). Empty when prefix cache is disabled.
-          - num_prefix_hit_blocks: length of the leading contiguous hit run.
-
-        The scheduler reuses block_hashes verbatim in `commit_prefix_plan` and
-        `mark_blocks_filled` — neither recomputes hashes.
+        Returns empty when prefix cache is disabled or `len(token_ids) < page_size`.
         """
         if not self.prefix_cache_enabled:
-            return [], 0
+            return []
 
         page_size = self.page_size
         num_full = len(token_ids) // page_size
         block_hashes: list[int] = []
-        num_prefix_hit_blocks = 0
-        contiguous = True
         prev_hash = self._SEED
-
         for i in range(num_full):
             block_hash = hash((prev_hash, tuple(token_ids[i * page_size : (i + 1) * page_size])))
             block_hashes.append(block_hash)
-            if contiguous and block_hash in self._block_hash_to_id:
-                num_prefix_hit_blocks += 1
-            else:
-                contiguous = False
             prev_hash = block_hash
+        return block_hashes
 
-        return block_hashes, num_prefix_hit_blocks
+    def count_prefix_hits(self, block_hashes: list[int]) -> int:
+        """Number of leading contiguous hits in the current cache index.
+
+        Cheap: O(N) dict-membership checks against `_block_hash_to_id`. Stops at the
+        first miss — a later "hit" would still require prefill to fill the gap (which
+        would overwrite the cached blocks), so we don't try to exploit scattered hits.
+        """
+        n = 0
+        for h in block_hashes:
+            if h not in self._block_hash_to_id:
+                break
+            n += 1
+        return n
 
     def commit_prefix_plan(
         self,
@@ -318,16 +319,16 @@ class KVCacheManager:
         num_prefix_hit_blocks: int,
         total_tokens: int,
     ) -> list[int] | None:
-        """Commit a plan from `plan_prefix_cache`: incref hit blocks, take fresh for the rest.
+        """Commit the plan: incref hit blocks, take fresh for the rest.
 
-        Single-threaded scheduler ⇒ cache state can't change between plan and commit,
+        Single-threaded scheduler ⇒ cache state can't change between count and commit,
         so the leading `num_prefix_hit_blocks` lookups via `_block_hash_to_id` are
         guaranteed to hit (the chain hash is unique to the content).
 
         Args:
-            block_hashes: hashes from plan_prefix_cache (one per full block). May be
-                empty when prefix cache is disabled or `total_tokens < page_size`.
-            num_prefix_hit_blocks: leading hits from plan_prefix_cache.
+            block_hashes: hashes from compute_block_hashes (one per full block).
+                May be empty when prefix cache is disabled or `total_tokens < page_size`.
+            num_prefix_hit_blocks: leading hits from count_prefix_hits.
             total_tokens: total tokens this request needs coverage for. Determines
                 whether a partial last block is needed (always fresh).
 
@@ -366,7 +367,7 @@ class KVCacheManager:
     # ---- prefix cache management ----
 
     def mark_blocks_filled(self, block_ids: list[int], block_hashes: list[int]) -> None:
-        """Stamp full blocks with the chain hashes computed by `plan_prefix_cache`.
+        """Stamp full blocks with the chain hashes computed by `compute_block_hashes`.
 
         Called every decode step (and once at prefill completion) — the fast-path
         check on the last full block (which is the last to be stamped, and refcounted

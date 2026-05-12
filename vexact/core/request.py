@@ -55,10 +55,11 @@ class InferenceRequest:
 
     block_ids: list[int] = field(default_factory=list)
 
-    # Chain hashes for each FULL block of input_ids_list, populated by the
-    # scheduler at activation via plan_prefix_cache. Reused by mark_blocks_filled
-    # so no module recomputes hashes. Reset on preempt — input_ids_list grows to
-    # include generated tokens, so the chain must be replanned on reactivation.
+    # Chain hashes for each FULL block of input_ids_list. Populated lazily by the
+    # scheduler via compute_block_hashes (deterministic per token sequence, so we
+    # cache here to avoid rehashing if the request gets requeued). Consumed by
+    # commit_prefix_plan and mark_blocks_filled. Reset on preempt — input_ids_list
+    # grows to include generated tokens, so the chain must be recomputed.
     prefix_block_hashes: list[int] = field(default_factory=list)
 
     # State: Outputs

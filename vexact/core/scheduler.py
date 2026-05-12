@@ -164,11 +164,17 @@ class Scheduler:
                 break
 
             try:
-                # Plan prefix-cache hits once. block_hashes flow through to
-                # _activate_request → commit_prefix_plan (no rehash) and later to
-                # mark_blocks_filled (also no rehash). Eliminates the triple-hash
-                # that the original peek/allocate/stamp paths had.
-                block_hashes, num_prefix_hit_blocks = self._kv_cache_manager.plan_prefix_cache(request.input_ids_list)
+                # Hashes are deterministic per token sequence — cache them on the
+                # request so a requeued request (budget-rejected this round) doesn't
+                # re-hash next round. Only `count_prefix_hits` (a few dict lookups)
+                # has to re-run, since the cache index may have changed.
+                if not request.prefix_block_hashes:
+                    request.prefix_block_hashes = self._kv_cache_manager.compute_block_hashes(
+                        request.input_ids_list
+                    )
+                num_prefix_hit_blocks = self._kv_cache_manager.count_prefix_hits(
+                    request.prefix_block_hashes
+                )
                 cached_tokens = num_prefix_hit_blocks * self._kv_cache_manager.page_size
                 # Pass num_comp explicitly so we don't mutate the request before
                 # we know it'll be activated.
@@ -176,7 +182,7 @@ class Scheduler:
                     request, available_token_budget, num_comp=cached_tokens
                 )
                 if available_token_budget >= tokens:
-                    self._activate_request(request, block_hashes, num_prefix_hit_blocks)
+                    self._activate_request(request, request.prefix_block_hashes, num_prefix_hit_blocks)
 
                     # Set scheduling fields and add to the active batch
                     available_token_budget -= tokens
@@ -278,7 +284,8 @@ class Scheduler:
         """Activate a request: commit the prefix-cache plan, attach hashes, bump
         num_computed_tokens past any cached prefix so prefill skips it.
 
-        The plan (block_hashes + num_prefix_hit_blocks) comes from `plan_prefix_cache`;
+        The plan (block_hashes + num_prefix_hit_blocks) comes from the two-step
+        `compute_block_hashes` + `count_prefix_hits` pattern in schedule();
         we never recompute hashes here. With prefix cache disabled (pp_size > 1),
         block_hashes is empty and every block is a fresh allocation — same behaviour
         as the original allocator.
