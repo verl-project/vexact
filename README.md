@@ -11,6 +11,55 @@ Transformer-based bitwise-aligned rollout for VeOmni FSDP with VeRL integration.
 - 🧩 **Simple model definitions** — Transformer model code is self-contained and easy to audit, so training and inference model definitions stay in sync
 - 📖 **Readable codebase** — Clean implementation with chunked prefill, pipeline parallelism, and CUDA graph support
 
+## Effectiveness 
+
+> **Qwen3-30B-A3B · REINFORCE++ · DAPO dataset**
+
+Off-policy logprob bias from vLLM causes the rollout-correction KL to explode after ~300 steps, which triggers gradient norm blow-up and ultimately training collapse. VeXact's bitwise-aligned rollout keeps the KL at exactly zero throughout, yielding stable training and a ~2× higher final AIME 2024 score.
+
+<table>
+  <tr>
+    <td align="center"><b>Training reward</b></td>
+    <td align="center"><b>AIME 2024 (mean@32)</b></td>
+  </tr>
+  <tr>
+    <td><img src="assets/figures/train_reward.png" width="360"/></td>
+    <td><img src="assets/figures/aime24.png" width="360"/></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Rollout-correction K3 KL (log scale)</b></td>
+    <td align="center"><b>Gradient norm (log scale)</b></td>
+  </tr>
+  <tr>
+    <td><img src="assets/figures/k3_kl.png" width="360"/></td>
+    <td><img src="assets/figures/grad_norm_logy.png" width="360"/></td>
+  </tr>
+</table>
+
+## Example Recipes
+
+End-to-end RL training scripts live under [`examples/`](examples/README.md). Run any script from the repo root:
+
+```bash
+bash examples/getting_started/run_qwen3_1b7.sh
+# override paths via env vars
+model_dir=/path/to/model data_dir=/path/to/data bash examples/moe/run_qwen3_30B_A3B_dapo.sh
+```
+
+| Recipe | Model | Dataset | Hardware | Algorithm |
+|---|---|---|---|---|
+| [`getting_started/run_qwen3_1b7.sh`](examples/getting_started/run_qwen3_1b7.sh) | Qwen3-1.7B | gsm8k | 1×8H100 | GRPO |
+| [`moe/run_qwen3_30B_A3B_dapo.sh`](examples/moe/run_qwen3_30B_A3B_dapo.sh) | Qwen3-30B-A3B | DAPO-Math-17k / AIME 2025 | 1×8H100 | DAPO |
+| [`moe/run_qwen3_30B_A3B_reinforce.sh`](examples/moe/run_qwen3_30B_A3B_reinforce.sh) | Qwen3-30B-A3B-Base | DAPO-Math-17k / AIME 2024 | 8×8H100 | REINFORCE++ |
+| [`moe/run_qwen3_30B_A3B_16H100.sh`](examples/moe/run_qwen3_30B_A3B_16H100.sh) | Qwen3-30B-A3B | gsm8k | 2×8H100 | GRPO |
+| [`moe/run_qwen3_30B_A3B_8B200.sh`](examples/moe/run_qwen3_30B_A3B_8B200.sh) | Qwen3-30B-A3B | gsm8k | 1×8B200 | GRPO |
+| [`moe/run_moonlight_gsm8k.sh`](examples/moe/run_moonlight_gsm8k.sh) | Moonlight-16B-A3B-Instruct | gsm8k | 1×8B200 | GRPO |
+| [`moe/run_moonlight_reinforce.sh`](examples/moe/run_moonlight_reinforce.sh) | Moonlight-16B-A3B-Instruct | DAPO-Math-17k / AIME 2024 | 1×8B200 | REINFORCE++ |
+| [`verify/run_dense_vexact.sh`](examples/verify/run_dense_vexact.sh) | DeepSeek-R1-Distill-Qwen-1.5B | MATH / AIME 2024+2025 | 1×8H100 | GRPO (vexact) |
+| [`verify/run_dense_vllm.sh`](examples/verify/run_dense_vllm.sh) | DeepSeek-R1-Distill-Qwen-1.5B | MATH / AIME 2024+2025 | 1×8H100 | GRPO (vllm) |
+
+See [`examples/README.md`](examples/README.md) for path configuration, attention backend selection, and an explanation of the `verify/` pair.
+
 ## Installation
 
 VeXact uses [uv](https://docs.astral.sh/uv/) for environment management. Pick
