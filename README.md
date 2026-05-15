@@ -2,6 +2,8 @@
 
 Transformer-based bitwise-aligned rollout for VeOmni FSDP with VeRL integration.
 
+VeXact is our zero-mismatch rollout engine for LLM reinforcement learning. See our paper **[Diagnosing Training-Inference Mismatch in LLM Reinforcement Learning](http://arxiv.org/abs/2605.14220)** for its use as a TIM-free diagnostic baseline.
+
 ## Key Features
 
 - 🎯 **Bitwise-aligned training & inference** — VeOmni FSDP actor and VeXact rollout engine produce identical logprobs for dense and MoE models with verl (the legacy FSDP engine is not supported for MoE models).
@@ -121,7 +123,7 @@ Besides VeRL and VeOmni, VeXact builds on and is inspired by the following proje
 
 ## Citation
 
-If you find our work useful, please cite:
+If you find our work useful, please consider citing our paper:
 
 ```bibtex
 @article{zhong2026diagnosing,
