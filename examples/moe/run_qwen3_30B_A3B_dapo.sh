@@ -83,7 +83,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.profiler.save_path=$profile_save_path \
     actor_rollout_ref.ref.veomni.optimizer_offload=True \
     algorithm.use_kl_in_reward=False \
-    trainer.use_legacy_worker_impl=disable \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='verl_grpo_qwen3moe_dapo' \

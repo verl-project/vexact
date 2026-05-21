@@ -110,6 +110,20 @@ class Worker(WorkerBase):
         if self.pp_info.pp_size > 1:
             pp_messager = PPMessager(pp_info=self.pp_info, parallel_config=config.parallel, device=self.device)
 
+        # VeOmni's fused MoE kernels (group_gemm/quack/npu) consult
+        # ``get_parallel_state().ep_enabled`` on each forward pass to decide
+        # between the EP and non-EP code paths. The lazy default
+        # ``ParallelState()`` asserts ``pp*dp*cp*ulysses*tp == world_size`` and
+        # therefore raises whenever torch.distributed reports world_size > 1
+        # (e.g. our PP>1 rollout). Bind a non-EP parallel state up front so
+        # subsequent MoE forwards take the cheap non-EP path; we never run
+        # expert parallelism inside the rollout worker. The helper is
+        # idempotent (warns + early-return when state already exists).
+        if torch.distributed.is_initialized():
+            from veomni.distributed.parallel_state import init_parallel_state
+
+            init_parallel_state(dp_size=torch.distributed.get_world_size())
+
         self.inferencer = Inferencer(
             model=self.model,
             config=config,
