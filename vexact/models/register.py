@@ -46,9 +46,15 @@ def register_models() -> None:
         except RuntimeError as e_quack:
             try:
                 apply_veomni_fused_moe_patch(fused_moe_kernel="triton")
-                print(f"[VEXACT] register_models(): bound VeOmni fused MoE kernel (triton, '{moe_kernel}' unavailable: {e_quack})")
+                print(
+                    f"[VEXACT] register_models(): bound VeOmni fused MoE kernel "
+                    f"(triton, '{moe_kernel}' unavailable: {e_quack})"
+                )
             except RuntimeError as e_triton:
-                print(f"[VEXACT] register_models(): skipping VeOmni MoE kernel binding (no GPU kernel available: quack={e_quack}; triton={e_triton})")
+                print(
+                    "[VEXACT] register_models(): skipping VeOmni MoE kernel binding "
+                    f"(no GPU kernel available: quack={e_quack}; triton={e_triton})"
+                )
 
         from .qwen3_moe.modeling_qwen3_moe import apply_qwen3_moe_patches
 
