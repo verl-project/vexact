@@ -42,6 +42,12 @@ logger = logging.getLogger(__name__)
 class Qwen3MoeExperts(nn.Module):
     """
     Fused experts container that stores all expert weights in stacked tensors.
+
+    Storage layout matches VeOmni's v5-patched ``Qwen3MoeExperts`` (fused
+    ``gate_up_proj`` of shape ``(num_experts, 2*intermediate, hidden)`` plus
+    separate ``down_proj``). This keeps the rollout-side parameter names
+    identical to the actor-side names so that verl's bucketed FSDP→rollout
+    weight sync can copy tensors directly without an unfuse step.
     """
 
     def __init__(self, config: Qwen3MoeConfig):
@@ -51,12 +57,8 @@ class Qwen3MoeExperts(nn.Module):
         self.intermediate_size = config.moe_intermediate_size
         self.act_fn = ACT2FN[config.hidden_act]
 
-        self.gate_proj = nn.Parameter(
-            torch.empty(self.num_experts, self.intermediate_size, self.hidden_dim),
-            requires_grad=True,
-        )
-        self.up_proj = nn.Parameter(
-            torch.empty(self.num_experts, self.intermediate_size, self.hidden_dim),
+        self.gate_up_proj = nn.Parameter(
+            torch.empty(self.num_experts, 2 * self.intermediate_size, self.hidden_dim),
             requires_grad=True,
         )
         self.down_proj = nn.Parameter(
@@ -72,25 +74,29 @@ class Qwen3MoeExperts(nn.Module):
         selected_experts: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if expert_idx is not None:
-            gate_proj_out = torch.matmul(hidden_states, self.gate_proj[expert_idx].transpose(0, 1))
-            up_proj_out = torch.matmul(hidden_states, self.up_proj[expert_idx].transpose(0, 1))
-            hidden = self.act_fn(gate_proj_out) * up_proj_out
+            gate_up = torch.matmul(hidden_states, self.gate_up_proj[expert_idx].transpose(0, 1))
+            gate, up = gate_up.chunk(2, dim=-1)
+            hidden = self.act_fn(gate) * up
             return torch.matmul(hidden, self.down_proj[expert_idx].transpose(0, 1))
 
         assert routing_weights is not None and selected_experts is not None, (
             "routing_weights and selected_experts must be provided when expert_idx is None"
         )
 
-        from vexact.batch_invariant_ops.fused_moe import fused_moe_forward
+        # Use VeOmni's fused MoE kernel directly (fc1_1_2_weight path), so the
+        # rollout side and VeOmni's actor side compute experts with identical
+        # arithmetic — required for `rollout_probs_diff_max == 0`.
+        from veomni.ops import fused_moe_forward
 
         return fused_moe_forward(
             num_experts=self.num_experts,
             routing_weights=routing_weights,
             selected_experts=selected_experts,
             hidden_states=hidden_states,
-            fc1_1_weight=self.gate_proj,
-            fc1_2_weight=self.up_proj,
+            fc1_1_weight=None,
+            fc1_2_weight=None,
             fc2_weight=self.down_proj,
+            fc1_1_2_weight=self.gate_up_proj,
         )
 
 
@@ -133,7 +139,10 @@ def moe_block_forward(self: Qwen3MoeSparseMoeBlock, hidden_states: torch.Tensor)
         selected_experts=selected_experts,
     )
     final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
-    return final_hidden_states, router_logits
+    # transformers v5: Qwen3MoeSparseMoeBlock.forward returns only hidden_states
+    # (router_logits collected via OutputRecorder hook on Qwen3MoeTopKRouter,
+    # which our plain-Linear gate bypasses; rollout doesn't need aux-loss stats).
+    return final_hidden_states
 
 
 ### Model patching ends
@@ -178,7 +187,7 @@ def _patched_load_pretrained_model(
 ### then weights are loaded by load_weights,
 ### we will override the load_weights method to fuse experts weights
 ### These should be removed after we upgrade to HF Transformers v5.
-_EXPERT_PROJS = {"gate_proj", "up_proj", "down_proj"}
+_EXPERT_PROJS = {"gate_proj", "up_proj", "down_proj", "gate_up_proj"}
 
 
 def load_qwen3_moe_weights(
@@ -205,11 +214,12 @@ def load_qwen3_moe_weights(
     # extra name and weight tensor from the weight iterator
     for full_name, loaded_weight in weight_iterator:
         if ".experts." in full_name and full_name.endswith(".weight"):
-            # Expected expert key format:
+            # Disk checkpoints (HF) store experts as per-expert separate keys:
             #   <prefix>.experts.<expert_idx>.<proj>.weight
             # Example:
             #   model.layers.0.mlp.experts.3.gate_proj.weight
-            # Copy received single expert weight into corresponding position in fused expert params
+            # Fuse them into the rollout-side ``gate_up_proj``/``down_proj``
+            # stacked tensors at the right per-expert slot.
             prefix, rest = full_name.split(".experts.", 1)
             try:
                 expert_idx_str, proj, suffix = rest.split(".")
@@ -217,19 +227,38 @@ def load_qwen3_moe_weights(
                 # Not a 3-part suffix, skip.
                 expert_idx_str, proj, suffix = None, None, None
             if suffix == "weight" and proj in _EXPERT_PROJS and expert_idx_str is not None and expert_idx_str.isdigit():
-                # Copy per-expert weights directly into fused expert params.
                 expert_idx = int(expert_idx_str)
                 try:
                     block = self.get_submodule(prefix)
                 except AttributeError:
                     block = None
                 experts = getattr(block, "experts", None) if block is not None else None
-                target = getattr(experts, proj, None) if isinstance(experts, Qwen3MoeExperts) else None
-                if target is not None and expert_idx < target.shape[0]:
+                if isinstance(experts, Qwen3MoeExperts) and expert_idx < experts.num_experts:
                     with torch.no_grad():
-                        target[expert_idx].copy_(loaded_weight.to(device=target.device, dtype=target.dtype))
+                        if proj == "gate_proj":
+                            target_slice = experts.gate_up_proj[expert_idx, : experts.intermediate_size, :]
+                            target_slice.copy_(loaded_weight.to(device=target_slice.device, dtype=target_slice.dtype))
+                        elif proj == "up_proj":
+                            target_slice = experts.gate_up_proj[expert_idx, experts.intermediate_size :, :]
+                            target_slice.copy_(loaded_weight.to(device=target_slice.device, dtype=target_slice.dtype))
+                        elif proj == "gate_up_proj":
+                            # FSDP-sync path: actor (VeOmni v5) ships the
+                            # already-fused per-expert tensor under
+                            # ``experts.{idx}.gate_up_proj.weight``; copy
+                            # straight into the matching per-expert slot.
+                            target_slice = experts.gate_up_proj[expert_idx]
+                            target_slice.copy_(loaded_weight.to(device=target_slice.device, dtype=target_slice.dtype))
+                        elif proj == "down_proj":
+                            target_slice = experts.down_proj[expert_idx]
+                            target_slice.copy_(loaded_weight.to(device=target_slice.device, dtype=target_slice.dtype))
                     direct_loaded_blocks.add(prefix)
                 continue
+
+        # FSDP-sync from the actor (VeOmni v5) delivers experts as fused stacked
+        # tensors named ``<prefix>.experts.gate_up_proj`` and
+        # ``<prefix>.experts.down_proj``. Those names land directly in
+        # ``full_param_dict`` (our experts are stored in the same fused layout),
+        # so the elif below copies them in one shot.
 
         # in the checkpoints there is a weight with name model.embed_tokens.weight
         if full_name == "model.embed_tokens.weight":

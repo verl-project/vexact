@@ -298,7 +298,13 @@ class ModelCreator:
         if self._pp_info.pp_size > 1:
             self._apply_pp()
 
-        with TorchMemorySaverAdapter.get_instance().region("weights", enable_cpu_backup=False):
+        # ``enable_cpu_backup=True``: torch_memory_saver offloads weights to
+        # CPU on pause and restores them on resume. Without this, pause→resume
+        # leaves the GPU memory uninitialized and the model produces garbage
+        # logits whenever any weight key isn't re-covered by the subsequent
+        # FSDP→rollout sync (notably an issue for MoE archs whose actor-side
+        # state_dict naming evolves across transformers releases).
+        with TorchMemorySaverAdapter.get_instance().region("weights", enable_cpu_backup=True):
             init_parameters(self._causal_model, self._config.dtype, self._device)
 
         load_weights_from_weight_path(self._causal_model, self._config, self._model_path)

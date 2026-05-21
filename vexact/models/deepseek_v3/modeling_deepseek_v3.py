@@ -100,22 +100,26 @@ class PatchDeepseekV3TopkRouter(nn.Module):
 
 
 class PatchDeepseekV3NaiveMoe(nn.Module):
-    """Identical to VeOmni's PatchDeepseekV3NaiveMoe, but uses vexact's fused_moe_forward."""
+    """Identical to VeOmni's PatchDeepseekV3NaiveMoe, but uses vexact's fused_moe_forward.
+
+    Storage layout matches VeOmni's v5-patched ``DeepseekV3NaiveMoe`` (fused
+    ``gate_up_proj`` of shape ``(num_experts, 2*intermediate, hidden)`` plus
+    separate ``down_proj``). This keeps the rollout-side parameter names
+    identical to the actor-side names so verl's bucketed FSDP→rollout weight
+    sync copies tensors directly without an unfuse step.
+    """
 
     def __init__(self, config):
         super().__init__()
         self.num_experts = config.n_routed_experts
         self.hidden_dim = config.hidden_size
         self.intermediate_dim = config.moe_intermediate_size
-        self.gate_proj = nn.Parameter(torch.empty(self.num_experts, self.intermediate_dim, self.hidden_dim))
-        self.up_proj = nn.Parameter(torch.empty(self.num_experts, self.intermediate_dim, self.hidden_dim))
+        self.gate_up_proj = nn.Parameter(torch.empty(self.num_experts, 2 * self.intermediate_dim, self.hidden_dim))
         self.down_proj = nn.Parameter(torch.empty(self.num_experts, self.hidden_dim, self.intermediate_dim))
         self.act_fn = ACT2FN[config.hidden_act]
         self._moe_implementation = getattr(config, "_moe_implementation", "fused")
 
     def forward(self, hidden_states, top_k_index, top_k_weights):
-        from vexact.batch_invariant_ops.fused_moe import fused_moe_forward
-
         final_hidden_states = torch.zeros_like(hidden_states)
 
         if self._moe_implementation == "eager":
@@ -130,22 +134,27 @@ class PatchDeepseekV3NaiveMoe(nn.Module):
                     continue
                 top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
                 current_state = hidden_states[token_idx]
-                gate = nn.functional.linear(current_state, self.gate_proj[expert_idx])
-                up = nn.functional.linear(current_state, self.up_proj[expert_idx])
+                gate, up = nn.functional.linear(current_state, self.gate_up_proj[expert_idx]).chunk(2, dim=-1)
                 current_hidden_states = self.act_fn(gate) * up
                 current_hidden_states = nn.functional.linear(current_hidden_states, self.down_proj[expert_idx])
                 current_hidden_states = current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
                 final_hidden_states.index_add_(0, token_idx, current_hidden_states.to(final_hidden_states.dtype))
         elif self._moe_implementation == "fused":
+            # Use VeOmni's fused MoE kernel directly (fc1_1_2_weight path), so
+            # rollout-side and actor-side experts compute with identical
+            # arithmetic — required for `rollout_probs_diff_max == 0`.
+            from veomni.ops import fused_moe_forward
+
             top_k_weights = top_k_weights.to(final_hidden_states.dtype)
             final_hidden_states = fused_moe_forward(
                 num_experts=self.num_experts,
                 routing_weights=top_k_weights,
                 selected_experts=top_k_index,
                 hidden_states=hidden_states,
-                fc1_1_weight=self.gate_proj,
-                fc1_2_weight=self.up_proj,
+                fc1_1_weight=None,
+                fc1_2_weight=None,
                 fc2_weight=self.down_proj,
+                fc1_1_2_weight=self.gate_up_proj,
             )
         else:
             raise ValueError(f"Invalid moe implementation: {self._moe_implementation}")
@@ -300,7 +309,7 @@ def _patched_load_pretrained_model(
 ### then weights are loaded by load_weights.
 ### We override load_weights to fuse expert weights.
 ### These should be removed after we upgrade to HF Transformers v5.
-_EXPERT_PROJS = {"gate_proj", "up_proj", "down_proj"}
+_EXPERT_PROJS = {"gate_proj", "up_proj", "down_proj", "gate_up_proj"}
 
 
 def load_deepseek_v3_weights(
@@ -322,11 +331,15 @@ def load_deepseek_v3_weights(
 
     for full_name, loaded_weight in weight_iterator:
         if ".experts." in full_name and full_name.endswith(".weight"):
-            # Expected expert key format:
+            # Disk checkpoints (HF) store experts as per-expert separate keys:
             #   <prefix>.experts.<expert_idx>.<proj>.weight
             # Example:
             #   model.layers.3.mlp.experts.42.gate_proj.weight
-            # Copy received single expert weight into corresponding position in fused expert params
+            # Fuse them into rollout-side ``gate_up_proj``/``down_proj`` stacked
+            # tensors at the right per-expert slot. FSDP-sync from the VeOmni v5
+            # actor delivers experts as ``<prefix>.experts.gate_up_proj`` /
+            # ``.down_proj`` (already fused) — those names land directly in
+            # ``full_param_dict`` via the elif branch below.
             prefix, rest = full_name.split(".experts.", 1)
             try:
                 expert_idx_str, proj, suffix = rest.split(".")
@@ -339,10 +352,24 @@ def load_deepseek_v3_weights(
                 except AttributeError:
                     block = None
                 experts = getattr(block, "experts", None) if block is not None else None
-                target = getattr(experts, proj, None) if isinstance(experts, PatchDeepseekV3NaiveMoe) else None
-                if target is not None and expert_idx < target.shape[0]:
+                if isinstance(experts, PatchDeepseekV3NaiveMoe) and expert_idx < experts.num_experts:
                     with torch.no_grad():
-                        target[expert_idx].copy_(loaded_weight.to(device=target.device, dtype=target.dtype))
+                        if proj == "gate_proj":
+                            target_slice = experts.gate_up_proj[expert_idx, : experts.intermediate_dim, :]
+                            target_slice.copy_(loaded_weight.to(device=target_slice.device, dtype=target_slice.dtype))
+                        elif proj == "up_proj":
+                            target_slice = experts.gate_up_proj[expert_idx, experts.intermediate_dim :, :]
+                            target_slice.copy_(loaded_weight.to(device=target_slice.device, dtype=target_slice.dtype))
+                        elif proj == "gate_up_proj":
+                            # FSDP-sync path: actor (VeOmni v5) ships the
+                            # already-fused per-expert tensor under
+                            # ``experts.{idx}.gate_up_proj.weight``; copy
+                            # straight into the matching per-expert slot.
+                            target_slice = experts.gate_up_proj[expert_idx]
+                            target_slice.copy_(loaded_weight.to(device=target_slice.device, dtype=target_slice.dtype))
+                        elif proj == "down_proj":
+                            target_slice = experts.down_proj[expert_idx]
+                            target_slice.copy_(loaded_weight.to(device=target_slice.device, dtype=target_slice.dtype))
                     direct_loaded_blocks.add(prefix)
                 continue
 
@@ -426,12 +453,40 @@ def apply_deepseek_v3_patches() -> None:
 
     DeepseekV3Attention.forward = deepseek_v3_attention_forward
 
-    # Patch RotaryEmbedding to use deterministic Triton bmm for cos/sin computation
+    # Align actor-side and rollout-side ``DeepseekV3Attention`` / RoPE /
+    # RMSNorm code paths so the bitwise-aligned MoE rollout works under v5.
+    #
+    # 1. Attention: VeOmni v5's stock ``DeepseekV3Attention.forward`` pads
+    #    ``value_states`` to ``qk_head_dim`` when FA is requested. This forces
+    #    the FA4 kernel onto its standard (non-MLA) codegen path, which is
+    #    numerically distinct from the MLA-native path that vexact's rollout
+    #    uses (unpadded V=128). Reuse the rollout's forward on actor too.
+    # 2. RoPE / RMSNorm: use vexact's deterministic Triton-bmm RoPE and
+    #    batch-invariant RMSNorm on actor too so the cos/sin and normalised
+    #    activations match the rollout side bit-for-bit.
+    deterministic_rope_forward = _make_deterministic_rope_forward()
+
     from transformers.models.deepseek_v3.modeling_deepseek_v3 import DeepseekV3RotaryEmbedding
 
-    DeepseekV3RotaryEmbedding.forward = _make_deterministic_rope_forward()
+    DeepseekV3RotaryEmbedding.forward = deterministic_rope_forward
 
-    # Patch RMSNorm to use batch-invariant Triton kernel
+    try:
+        import veomni.models.transformers.deepseek_v3.generated.patched_modeling_deepseek_v3_gpu as _veomni_dsv3
+
+        _veomni_dsv3.DeepseekV3Attention.forward = deepseek_v3_attention_forward
+        _veomni_dsv3.DeepseekV3RotaryEmbedding.forward = deterministic_rope_forward
+        # Match vexact's batch-invariant RMSNorm on actor side too.
+        from vexact.batch_invariant_ops import batch_invariant_rms_norm as _bi_rms_norm
+
+        def _bi_rms_norm_forward(self, hidden_states):
+            return _bi_rms_norm(hidden_states, self.weight, self.variance_epsilon)
+
+        _veomni_dsv3.DeepseekV3RMSNorm.forward = _bi_rms_norm_forward
+        logger.info("[VEXACT] Patched VeOmni actor-side DeepseekV3Attention/RoPE/RMSNorm to match rollout")
+    except Exception as e:
+        logger.info(f"[VEXACT] Skipped VeOmni actor-side attention/RoPE/RMSNorm patch ({e})")
+
+    # Patch transformers-stock RMSNorm too (used by rollout side via stock class).
     _patch_rms_norm_batch_invariant()
 
     logger.info("Applied DeepSeek-V3 monkey patches.")

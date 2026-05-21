@@ -94,7 +94,6 @@ RAY_DEDUP_LOGS=0 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     custom_reward_function.name=compute_math_score \
     trainer.project_name=vexact-baseline-math-moe-reinforce \
     trainer.experiment_name=vexact-exp-MOE \
-    trainer.use_legacy_worker_impl=disable \
     trainer.test_freq=20 \
     trainer.log_val_generations=20 \
     trainer.val_before_train=True \
