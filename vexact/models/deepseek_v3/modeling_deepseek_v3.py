@@ -482,9 +482,7 @@ def apply_deepseek_v3_patches() -> None:
             return _bi_rms_norm(hidden_states, self.weight, self.variance_epsilon)
 
         _veomni_dsv3.DeepseekV3RMSNorm.forward = _bi_rms_norm_forward
-        logger.info(
-            "[VEXACT] Patched VeOmni actor-side DeepseekV3Attention/RoPE/RMSNorm to match rollout"
-        )
+        logger.info("[VEXACT] Patched VeOmni actor-side DeepseekV3Attention/RoPE/RMSNorm to match rollout")
     except Exception as e:
         logger.info(f"[VEXACT] Skipped VeOmni actor-side attention/RoPE/RMSNorm patch ({e})")
 
