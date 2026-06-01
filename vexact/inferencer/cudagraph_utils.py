@@ -17,6 +17,7 @@ CUDAGraph utils
 Reference: https://github.com/vllm-project/vllm/blob/d49899732edd3e6c011ec9f922601d919250a4d2/vllm/v1/worker/gpu/cudagraph_utils.py#L1
 """
 
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -27,11 +28,25 @@ from vexact.config import CacheConfig
 from vexact.core.runtime_data import InputBuffers
 
 
+@dataclass(frozen=True)
+class BatchExecutionDescriptor:
+    """
+    Shape captured by a CUDA graph.
+
+    `num_tokens` is the padded token bucket. `num_seqs` is the padded sequence
+    count. A descriptor can replay any runtime batch with no more tokens or
+    sequences than these limits.
+    """
+
+    num_tokens: int
+    num_seqs: int
+
+
 class CudaGraphManager:
     """
-    Decode-only CUDA graph capture/replay helper for VeXact `model.forward`.
+    CUDA graph capture/replay helper for VeXact `model.forward`.
 
-    - Captures graphs for decode batches (seq_len=1) at specified batch sizes.
+    - Captures graphs keyed by padded sequence count and token bucket size.
     - Uses external InputBuffers for static inputs/context.
     - Caller manages real KV contents; the manager replays with updated buffers.
     """
@@ -54,10 +69,17 @@ class CudaGraphManager:
         self.capture_sizes = self.build_capture_sizes(max_size)
         # Always use a graph pool; allow an external one to be injected.
         self.pool = pool if pool is not None else torch.cuda.graph_pool_handle()
-        self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
-        self.outputs: dict[int, Any] = {}
+        self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
+        self.outputs: dict[BatchExecutionDescriptor, Any] = {}
         self.forward_kwargs = forward_kwargs or {}
         self.input_buffers = input_buffers
+        self._descriptors = [
+            BatchExecutionDescriptor(
+                num_tokens=capture_size,
+                num_seqs=min(capture_size, self.input_buffers.max_num_seqs),
+            )
+            for capture_size in self.capture_sizes
+        ]
 
     @staticmethod
     def build_capture_sizes(max_size: int | None) -> list[int]:
@@ -71,48 +93,66 @@ class CudaGraphManager:
         sizes.append(size)
         return sizes
 
-    def select_capture_size(self, total_tokens: int) -> int | None:
-        """
-        public method for inferencer to select a proper graph size to replay
-        """
-        for size in self.capture_sizes:
-            if size >= total_tokens:
-                return size
-        return None
-
     def capture_graphs(self) -> None:
         if not self.capture_sizes:
             raise RuntimeError("CudaGraphManger capture sizes are not set.")
-        for capture_size in self.capture_sizes:
-            self.capture(capture_size)
+        for desc in self._descriptors:
+            self.capture(desc)
+
+    def dispatch(self, num_seqs: int, total_tokens: int) -> BatchExecutionDescriptor | None:
+        for desc in self._descriptors:
+            if desc.num_seqs >= num_seqs and desc.num_tokens >= total_tokens:
+                return desc
+        return None
 
     @torch.inference_mode()
-    def capture(self, capture_size: int) -> int:
+    def capture(self, desc: BatchExecutionDescriptor) -> BatchExecutionDescriptor:
         """
-        Capture a CUDA graph for decode-only batch of size `capture_size`.
-        Returns capture_size for replay.
+        Capture a CUDA graph for a packed batch shape.
+        Returns the graph key for replay.
         """
+        num_seqs = desc.num_seqs
+        capture_tokens = desc.num_tokens
+        if num_seqs <= 0 or capture_tokens <= 0:
+            raise ValueError(f"num_seqs and capture_tokens must be positive, got {num_seqs=}, {capture_tokens=}")
+        if num_seqs > capture_tokens:
+            raise ValueError(f"num_seqs cannot exceed capture_tokens, got {num_seqs=}, {capture_tokens=}")
+        if num_seqs > self.input_buffers.max_num_seqs:
+            raise ValueError(f"num_seqs exceeds input buffer capacity: {num_seqs} > {self.input_buffers.max_num_seqs}")
+        if capture_tokens > self.input_buffers.max_num_batched_tokens:
+            raise ValueError(
+                "capture_tokens exceeds input buffer capacity: "
+                f"{capture_tokens} > {self.input_buffers.max_num_batched_tokens}"
+            )
+
+        if desc in self.graphs:
+            return desc
 
         static_inputs = {
-            "input_ids": self.input_buffers.input_ids.gpu[:, :capture_size],
-            "intermediate_tensors": self.input_buffers.intermediate_tensors.gpu[:, :capture_size, :],
-            "position_ids": self.input_buffers.position_ids.gpu[:, :capture_size],
+            "input_ids": self.input_buffers.input_ids.gpu[:, :capture_tokens],
+            "intermediate_tensors": self.input_buffers.intermediate_tensors.gpu[:, :capture_tokens, :],
+            "position_ids": self.input_buffers.position_ids.gpu[:, :capture_tokens],
         }
 
-        # slice kv context to capture_size size
         (
             block_tables,
             context_lens,
             slot_mapping,
             query_start_loc,
-        ) = self.input_buffers.get_kv_context_tensors(capture_size)
+        ) = self.input_buffers.get_kv_context_tensors(num_seqs=num_seqs, num_tokens=capture_tokens)
 
-        # we set context_lens to 0 instead so that no KV cache would be actually touched in capture
-        context_lens.zero_()
+        self.input_buffers.input_ids.gpu[:, :capture_tokens].zero_()
+        self.input_buffers.position_ids.gpu[:, :capture_tokens].zero_()
+        self.input_buffers.intermediate_tensors.gpu[:, :capture_tokens, :].zero_()
+        block_tables.zero_()
         # prevent any KV writes during capture
         slot_mapping.fill_(-1)
-        # with position_ids as all 0, legit query_start_loc is just [0, 1, 2, ...]
-        query_start_loc.copy_(torch.arange(query_start_loc.numel(), device=self.device, dtype=torch.int32))
+
+        tokens_per_seq = torch.full((num_seqs,), capture_tokens // num_seqs, device=self.device, dtype=torch.int32)
+        tokens_per_seq[: capture_tokens % num_seqs] += 1
+        query_start_loc[0].zero_()
+        query_start_loc[1:].copy_(tokens_per_seq.cumsum(0))
+        context_lens.copy_(tokens_per_seq)
 
         # Warm up to ensure kernels are initialized before graph capture.
         set_kv_cache_context(
@@ -123,7 +163,7 @@ class CudaGraphManager:
             context_lens=context_lens,
             slot_mapping=slot_mapping,
             query_start_loc=query_start_loc,
-            max_seqlen_q=1,
+            max_seqlen_q=capture_tokens,
         )
         _ = self.model(**static_inputs, **self.forward_kwargs)
 
@@ -131,21 +171,20 @@ class CudaGraphManager:
         with torch.no_grad(), torch.cuda.graph(graph, self.pool):
             outputs = self.model(**static_inputs, **self.forward_kwargs)
 
-        self.graphs[capture_size] = graph
-        self.outputs[capture_size] = outputs
-        return capture_size
+        self.graphs[desc] = graph
+        self.outputs[desc] = outputs
+        return desc
 
     @torch.inference_mode()
-    def replay(self, capture_size: int) -> Any:
+    def replay(self, graph_key: BatchExecutionDescriptor) -> Any:
         """
         Replay a captured graph after copying new inputs and KV context into static buffers.
 
         Args:
-            capture_size: batch size used during capture.
-            gen_ctx: decode-only generation context with packed inputs and KV metadata.
+            graph_key: sequence count and token bucket used during capture.
         """
-        if capture_size not in self.graphs:
-            raise KeyError(f"No captured graph for id {capture_size}. Captured: {list(self.graphs)}")
+        if graph_key not in self.graphs:
+            raise KeyError(f"No captured graph for id {graph_key}. Captured: {list(self.graphs)}")
 
-        self.graphs[capture_size].replay()
-        return self.outputs[capture_size]
+        self.graphs[graph_key].replay()
+        return self.outputs[graph_key]

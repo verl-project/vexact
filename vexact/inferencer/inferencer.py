@@ -39,7 +39,7 @@ from vexact.config import PPInfo, VeXactConfig
 from vexact.core.request import InferenceRequest
 from vexact.core.runtime_data import GenerationContext, InferencerOutput, InputBuffers
 from vexact.distributed.pp_messager import PPMessager
-from vexact.inferencer.cudagraph_utils import CudaGraphManager
+from vexact.inferencer.cudagraph_utils import BatchExecutionDescriptor, CudaGraphManager
 from vexact.inferencer.sampler import Sampler
 from vexact.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 
@@ -88,7 +88,7 @@ class Inferencer:
         # TODO: remove them here, create block table helper to get slot mappings
         self.page_size = self.cache_config.page_size
 
-        if not is_batch_invariant_mode_enabled():
+        if enable_batch_invariant and not is_batch_invariant_mode_enabled():
             enable_batch_invariant_mode()
 
         self.input_buffers = InputBuffers(
@@ -103,23 +103,23 @@ class Inferencer:
         self._cudagraph_mgr: Optional[CudaGraphManager] = None
         should_enforce_eager = config.model.enforce_eager
         if not should_enforce_eager:
+            if config.model.attn_impl == "flex":
+                raise RuntimeError("Cuda graph is enabled but flex attention is not supported for CUDA graph replay.")
+            if not enable_batch_invariant and not is_batch_invariant_mode_enabled():
+                raise RuntimeError("Cuda graph is enabled but batch invariant mode is disabled.")
             logger.info("Enabling cudagraph...")
-            # CUDA graphs only replay for decode-only batches where each sequence
-            # contributes exactly 1 token, so the max batch size is bounded by
-            # both max_num_seqs and max_num_batched_tokens.
-            cudagraph_max_size = min(config.scheduler.max_num_seqs, config.scheduler.max_num_batched_tokens)
             self._cudagraph_mgr = CudaGraphManager(
                 model=self.model,
                 device=self.device,
                 cache_store=self.cache_store,
-                max_size=cudagraph_max_size,
+                max_size=config.scheduler.max_num_batched_tokens,
                 cache_config=self.cache_config,
                 forward_kwargs=self.forward_kwargs,
                 input_buffers=self.input_buffers,
             )
             self._cudagraph_mgr.capture_graphs()
         else:
-            logger.info("Cudagraphs disabled because enforce_eager is set or PP size > 1.")
+            logger.info("Cudagraphs disabled because enforce_eager is set.")
 
     def infer(self, requests: Sequence[InferenceRequest], recv_infer_out: bool = False) -> Optional[InferencerOutput]:
         """
@@ -296,18 +296,38 @@ class Inferencer:
             is_decode_only=is_decode_only,
         )
 
-    def _prepare_input_buffers_from_gen_ctx(self, gen_ctx: GenerationContext) -> None:
+    def _prepare_input_buffers_from_gen_ctx(
+        self, gen_ctx: GenerationContext, graph_desc: BatchExecutionDescriptor
+    ) -> None:
         buffers = self.input_buffers
+        capture_tokens = graph_desc.num_tokens
+        graph_num_seqs = graph_desc.num_seqs
         num_seqs = gen_ctx.context_lens.size(0)
         total_tokens = gen_ctx.batch_position_ids.size(1)
+        if total_tokens > capture_tokens:
+            raise ValueError(f"total_tokens exceeds capture_tokens: {total_tokens} > {capture_tokens}")
+        if graph_num_seqs < num_seqs:
+            raise ValueError(f"graph_num_seqs cannot be smaller than num_seqs: {graph_num_seqs} < {num_seqs}")
 
+        buffers.input_ids.gpu[:, :capture_tokens].zero_()
+        buffers.position_ids.gpu[:, :capture_tokens].zero_()
+        buffers.intermediate_tensors.gpu[:, :capture_tokens, :].zero_()
+        buffers.block_tables.gpu.fill_(-1)
+        buffers.context_lens.gpu.zero_()
         buffers.slot_mapping.gpu.fill_(-1)
-        buffers.query_start_loc.gpu.fill_(total_tokens)
+        buffers.query_start_loc.gpu.zero_()
 
         buffers.block_tables.gpu[:num_seqs, :].copy_(gen_ctx.block_tables)
         buffers.context_lens.gpu[:num_seqs].copy_(gen_ctx.context_lens)
         buffers.slot_mapping.gpu[:total_tokens].copy_(gen_ctx.slot_mapping)
         buffers.query_start_loc.gpu[: num_seqs + 1].copy_(gen_ctx.query_start_loc)
+        if graph_num_seqs > num_seqs:
+            # Match vLLM v2's FULL graph padding: padded request rows are
+            # zero-length and point at the real token count, which keeps
+            # query_start_loc non-decreasing without assigning padded tokens to
+            # fake requests.
+            buffers.block_tables.gpu[num_seqs:graph_num_seqs, :].zero_()
+            buffers.query_start_loc.gpu[num_seqs + 1 : graph_num_seqs + 1] = total_tokens
 
         num_tokens = gen_ctx.batch_position_ids.shape[1]
         if gen_ctx.batch_input_ids is not None:
@@ -316,10 +336,12 @@ class Inferencer:
         if gen_ctx.intermediate_tensors is not None:
             buffers.intermediate_tensors.gpu[:, :num_tokens, :].copy_(gen_ctx.intermediate_tensors)
 
-        block_tables = buffers.block_tables.gpu[:num_seqs, :]
-        slot_mapping = buffers.slot_mapping.gpu[:total_tokens]
-        context_lens = buffers.context_lens.gpu[:num_seqs]
-        query_start_loc = buffers.query_start_loc.gpu[: num_seqs + 1]
+        (
+            block_tables,
+            context_lens,
+            slot_mapping,
+            query_start_loc,
+        ) = buffers.get_kv_context_tensors(num_seqs=graph_num_seqs, num_tokens=capture_tokens)
 
         set_kv_cache_context(
             is_paged_attn=True,
@@ -334,17 +356,22 @@ class Inferencer:
 
     @torch.inference_mode()
     def _forward(self, gen_ctx: GenerationContext) -> Any:
-        if self._cudagraph_mgr and gen_ctx.is_decode_only:
+        if self._cudagraph_mgr:
             if gen_ctx.batch_input_ids is not None:
                 input_size = gen_ctx.batch_input_ids.size(1)
             else:
                 input_size = gen_ctx.intermediate_tensors.size(1)
 
-            capture_size = self._cudagraph_mgr.select_capture_size(input_size)
-            if capture_size is not None:
-                # cudagraph forward does not read inputs from gen_ctx but from preallocated input buffers
-                self._prepare_input_buffers_from_gen_ctx(gen_ctx)
-                return self._forward_cudagraph(capture_size)
+            graph_desc = self._cudagraph_mgr.dispatch(gen_ctx.context_lens.size(0), input_size)
+            if graph_desc is None:
+                raise RuntimeError(
+                    "Cuda graph is enabled but no captured descriptor can cover "
+                    f"{gen_ctx.context_lens.size(0)} sequences and {input_size} tokens. "
+                    f"Available descriptors: {list(self._cudagraph_mgr.graphs)}"
+                )
+            # cudagraph forward does not read inputs from gen_ctx but from preallocated input buffers
+            self._prepare_input_buffers_from_gen_ctx(gen_ctx, graph_desc)
+            return self._forward_cudagraph(graph_desc)
 
         return self._forward_eager(gen_ctx)
 
@@ -361,9 +388,9 @@ class Inferencer:
 
         return outputs
 
-    def _forward_cudagraph(self, capture_size: int) -> Any:
+    def _forward_cudagraph(self, graph_key: BatchExecutionDescriptor) -> Any:
         with torch.cuda.nvtx.range("model_forward_cudagraph"):
-            outputs = self._cudagraph_mgr.replay(capture_size)
+            outputs = self._cudagraph_mgr.replay(graph_key)
 
         return outputs
 

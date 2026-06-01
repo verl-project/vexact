@@ -100,16 +100,18 @@ class InputBuffers:
             1, max_num_batched_tokens, dtype=torch.long, device=device, fill_value=0
         )
 
-    def get_kv_context_tensors(self, num_seqs: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return KV context slices for a decode-only batch (num_tokens == num_seqs).
+    def get_kv_context_tensors(
+        self, num_seqs: int, num_tokens: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return KV context slices for a packed batch.
 
-        For prefill / chunked-prefill batches, slot_mapping needs token-level slicing;
-        do not reuse this helper without extending the API.
+        `block_tables`, `context_lens`, and `query_start_loc` are sequence-level
+        metadata, while `slot_mapping` is token-level metadata.
         """
         return (
             self.block_tables.gpu[:num_seqs, :],
             self.context_lens.gpu[:num_seqs],
-            self.slot_mapping.gpu[:num_seqs],
+            self.slot_mapping.gpu[:num_tokens],
             self.query_start_loc.gpu[: num_seqs + 1],
         )
 
