@@ -105,8 +105,6 @@ class Inferencer:
         if not should_enforce_eager:
             if config.model.attn_impl == "flex":
                 raise RuntimeError("Cuda graph is enabled but flex attention is not supported for CUDA graph replay.")
-            if not enable_batch_invariant and not is_batch_invariant_mode_enabled():
-                raise RuntimeError("Cuda graph is enabled but batch invariant mode is disabled.")
             logger.info("Enabling cudagraph...")
             self._cudagraph_mgr = CudaGraphManager(
                 model=self.model,

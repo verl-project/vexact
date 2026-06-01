@@ -18,6 +18,11 @@ import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig, PretrainedConfig
 
+from vexact.batch_invariant_ops import (
+    disable_batch_invariant_mode,
+    enable_batch_invariant_mode,
+    is_batch_invariant_mode_enabled,
+)
 from vexact.config import CacheConfig, ModelConfig, PPInfo, SchedulerConfig, VeXactConfig
 from vexact.core.request import InferenceRequest
 from vexact.core.runtime_data import InferencerOutput
@@ -365,6 +370,7 @@ def _run_inferencer(
     max_num_seqs: int = 2,
     max_num_batched_tokens: int = 8,
     return_inferencer: bool = False,
+    enable_batch_invariant: bool = True,
 ) -> InferencerOutput | tuple[InferencerOutput, Inferencer]:
     inferencer = Inferencer(
         model=model,
@@ -376,7 +382,7 @@ def _run_inferencer(
         pp_info=PPInfo(1, 0),
         pp_messager=None,
         device=device,
-        enable_batch_invariant=True,
+        enable_batch_invariant=enable_batch_invariant,
     )
     _zero_kv_cache(inferencer)
     out = inferencer.infer(requests)
@@ -411,6 +417,42 @@ def test_inferencer_cudagraph_prefill_matches_eager(model, device, model_path, c
     out_eager = _run_inferencer(model, model_path, cache_config, device, make_requests("eg"), enforce_eager=True)
 
     _assert_inferencer_outputs_close(out_cg, out_eager)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for cudagraph replay")
+def test_inferencer_cudagraph_does_not_require_batch_invariant_mode(model, device, model_path, cache_config):
+    generation_config = _cudagraph_generation_config()
+    input_ids_list = [1, 2, 3, 4]
+    requests = [
+        _make_request(
+            "cg_no_batch_invariant",
+            input_ids_list=input_ids_list,
+            tokens_this_step=len(input_ids_list),
+            num_computed_tokens=len(input_ids_list),
+            block_id=0,
+            generation_config=generation_config,
+        )
+    ]
+
+    batch_invariant_was_enabled = is_batch_invariant_mode_enabled()
+    disable_batch_invariant_mode()
+    try:
+        out_cg, inferencer_cg = _run_inferencer(
+            model,
+            model_path,
+            cache_config,
+            device,
+            requests,
+            enforce_eager=False,
+            return_inferencer=True,
+            enable_batch_invariant=False,
+        )
+    finally:
+        if batch_invariant_was_enabled:
+            enable_batch_invariant_mode()
+
+    assert inferencer_cg._cudagraph_mgr is not None
+    assert out_cg.token_ids.numel() == 1
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for cudagraph replay")
