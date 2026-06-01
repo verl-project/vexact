@@ -14,12 +14,14 @@ engine's own on/off delta is the meaningful result.
 
 ## Summary (256 requests, 1× H100, Qwen3-1.7B)
 
-| Engine | batch-invariant | Throughput (req/s) | Total tokens/s | Wall time | Wall-time slowdown (ON vs OFF) |
-| ------ | --------------- | ------------------ | -------------- | --------- | ------------------------------ |
-| VeXact | ON (invariant)  | 9.25               | 4015.19        | 27.66s    | **+82%** (1.82×)               |
-| VeXact | OFF (variant)   | 16.86              | 7314.25        | 15.19s    | — (baseline)                   |
-| vllm   | ON (invariant)  | 10.83              | 4698.53        | 23.64s    | **+127%** (2.27×)              |
-| vllm   | OFF (variant)   | 24.59              | 10666.40       | 10.41s    | — (baseline)                   |
+| Engine                   | batch-invariant | Throughput (req/s) | Total tokens/s | Wall time | Wall-time slowdown (ON vs OFF) |
+| ------------------------ | --------------- | ------------------ | -------------- | --------- | ------------------------------ |
+| VeXact                   | ON (invariant)  | 9.25               | 4015.19        | 27.66s    | **+82%** (1.82×)               |
+| VeXact                   | OFF (variant)   | 16.86              | 7314.25        | 15.19s    | — (baseline)                   |
+| vexact-prefill-cudagraph | ON (invariant)  | 14.72              | 6385.00        | 17.40s    | **+56%** (1.56×)               |
+| vexact-prefill-cudagraph | OFF (variant)   | 23.00              | 9976.88        | 11.13s    | — (baseline)                   |
+| vllm                     | ON (invariant)  | 10.83              | 4698.53        | 23.64s    | **+127%** (2.27×)              |
+| vllm                     | OFF (variant)   | 24.59              | 10666.40       | 10.41s    | — (baseline)                   |
 
 Turning batch-invariance ON costs **+82% wall time on VeXact** (1.82×) and
 **+127% on vllm** (2.27×). Cross-engine absolute numbers are not comparable
@@ -28,12 +30,14 @@ details and metric definitions follow below.
 
 ### Summary — 512 requests
 
-| Engine | batch-invariant | Throughput (req/s) | Total tokens/s | Wall time | Wall-time slowdown (ON vs OFF) |
-| ------ | --------------- | ------------------ | -------------- | --------- | ------------------------------ |
-| VeXact | ON (invariant)  | 11.82              | 5030.05        | 43.30s    | **+77%** (1.77×)               |
-| VeXact | OFF (variant)   | 20.88              | 8881.09        | 24.52s    | — (baseline)                   |
-| vllm   | ON (invariant)  | 18.95              | 8060.05        | 27.02s    | **+111%** (2.11×)              |
-| vllm   | OFF (variant)   | 40.03              | 17028.39       | 12.79s    | — (baseline)                   |
+| Engine                   | batch-invariant | Throughput (req/s) | Total tokens/s | Wall time | Wall-time slowdown (ON vs OFF) |
+| ------------------------ | --------------- | ------------------ | -------------- | --------- | ------------------------------ |
+| VeXact                   | ON (invariant)  | 11.82              | 5030.05        | 43.30s    | **+77%** (1.77×)               |
+| VeXact                   | OFF (variant)   | 20.88              | 8881.09        | 24.52s    | — (baseline)                   |
+| vexact-prefill-cudagraph | ON (invariant)  | 19.37              | 8237.76        | 26.44s    | **+53%** (1.53×)               |
+| vexact-prefill-cudagraph | OFF (variant)   | 29.63              | 12604.04       | 17.28s    | — (baseline)                   |
+| vllm                     | ON (invariant)  | 18.95              | 8060.05        | 27.02s    | **+111%** (2.11×)              |
+| vllm                     | OFF (variant)   | 40.03              | 17028.39       | 12.79s    | — (baseline)                   |
 
 ## Setup
 

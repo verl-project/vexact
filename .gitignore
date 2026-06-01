@@ -83,8 +83,9 @@ outputs/
 verl_rollout_profile_gsm8k
 
 # local batch-invariance benchmark scripts + results (keep batch_invariance_results.md)
-benchmarks/run_invariance_compare.sh
-benchmarks/run_vllm_invariance_compare.sh
+benchmarks/*.sh
 benchmarks/vllm_throughput.py
 benchmarks/invariance_results*/
 benchmarks/vllm_invariance_results*/
+benchmarks/parallel_results*/
+batch_probe
