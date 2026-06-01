@@ -235,6 +235,7 @@ def test_inferencer_cudagraph_decode_matches_eager(model, device, model_path, ca
         max_new_tokens=2,
         max_length=16,
         do_sample=False,
+        top_p=1.0,
     )
     generation_config.output_logits = True
 
@@ -312,3 +313,191 @@ def test_inferencer_cudagraph_decode_matches_eager(model, device, model_path, ca
     assert torch.equal(out_cg.token_ids, out_eager.token_ids)
     if out_cg.logits.numel() > 0 or out_eager.logits.numel() > 0:
         torch.testing.assert_close(out_cg.logits, out_eager.logits, atol=0, rtol=0)
+
+
+def _cudagraph_generation_config() -> GenerationConfig:
+    generation_config = GenerationConfig(
+        max_new_tokens=2,
+        max_length=32,
+        do_sample=False,
+        top_p=1.0,
+    )
+    generation_config.output_logits = True
+    return generation_config
+
+
+def _zero_kv_cache(inferencer: Inferencer) -> None:
+    for cache_tensor in inferencer.cache_store.key_cache.values():
+        cache_tensor.zero_()
+    for cache_tensor in inferencer.cache_store.value_cache.values():
+        cache_tensor.zero_()
+
+
+def _make_request(
+    request_id: str,
+    input_ids_list: list[int],
+    tokens_this_step: int,
+    num_computed_tokens: int,
+    block_id: int,
+    generation_config: GenerationConfig,
+    generated_tokens: list[int] | None = None,
+) -> InferenceRequest:
+    req = InferenceRequest(
+        request_id=request_id,
+        input_ids_list=input_ids_list,
+        generation_config=generation_config,
+        block_ids=[block_id],
+    )
+    req.generated_tokens = generated_tokens or []
+    req.tokens_this_step = tokens_this_step
+    req.num_computed_tokens = num_computed_tokens
+    return req
+
+
+def _run_inferencer(
+    model: torch.nn.Module,
+    model_path: str,
+    cache_config: CacheConfig,
+    device: torch.device,
+    requests: list[InferenceRequest],
+    *,
+    enforce_eager: bool,
+    max_num_seqs: int = 2,
+    max_num_batched_tokens: int = 8,
+    return_inferencer: bool = False,
+) -> InferencerOutput | tuple[InferencerOutput, Inferencer]:
+    inferencer = Inferencer(
+        model=model,
+        config=VeXactConfig(
+            model=ModelConfig(model_path=model_path, hf_config=model.config, enforce_eager=enforce_eager),
+            cache=cache_config,
+            scheduler=SchedulerConfig(max_num_seqs=max_num_seqs, max_num_batched_tokens=max_num_batched_tokens),
+        ),
+        pp_info=PPInfo(1, 0),
+        pp_messager=None,
+        device=device,
+        enable_batch_invariant=True,
+    )
+    _zero_kv_cache(inferencer)
+    out = inferencer.infer(requests)
+    if return_inferencer:
+        return out, inferencer
+    return out
+
+
+def _assert_inferencer_outputs_close(out_cg: InferencerOutput, out_eager: InferencerOutput) -> None:
+    assert torch.equal(out_cg.token_ids, out_eager.token_ids)
+    torch.testing.assert_close(out_cg.logits, out_eager.logits, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for cudagraph replay")
+def test_inferencer_cudagraph_prefill_matches_eager(model, device, model_path, cache_config):
+    generation_config = _cudagraph_generation_config()
+
+    def make_requests(prefix: str) -> list[InferenceRequest]:
+        input_ids_list = [1, 2, 3, 4]
+        return [
+            _make_request(
+                f"{prefix}_0",
+                input_ids_list=input_ids_list,
+                tokens_this_step=len(input_ids_list),
+                num_computed_tokens=len(input_ids_list),
+                block_id=0,
+                generation_config=generation_config,
+            )
+        ]
+
+    out_cg = _run_inferencer(model, model_path, cache_config, device, make_requests("cg"), enforce_eager=False)
+    out_eager = _run_inferencer(model, model_path, cache_config, device, make_requests("eg"), enforce_eager=True)
+
+    _assert_inferencer_outputs_close(out_cg, out_eager)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for cudagraph replay")
+def test_inferencer_cudagraph_mixed_prefill_decode_matches_eager(model, device, model_path, cache_config):
+    generation_config = _cudagraph_generation_config()
+
+    def make_requests(prefix: str) -> list[InferenceRequest]:
+        prefill_ids = [1, 2, 3]
+        decode_ids = [4, 5, 6, 7]
+        return [
+            _make_request(
+                f"{prefix}_prefill",
+                input_ids_list=prefill_ids,
+                tokens_this_step=len(prefill_ids),
+                num_computed_tokens=len(prefill_ids),
+                block_id=0,
+                generation_config=generation_config,
+            ),
+            _make_request(
+                f"{prefix}_decode",
+                input_ids_list=decode_ids,
+                tokens_this_step=1,
+                num_computed_tokens=len(decode_ids) + 1,
+                block_id=1,
+                generation_config=generation_config,
+                generated_tokens=[8],
+            ),
+        ]
+
+    out_cg, inferencer_cg = _run_inferencer(
+        model, model_path, cache_config, device, make_requests("cg"), enforce_eager=False, return_inferencer=True
+    )
+    out_eager = _run_inferencer(model, model_path, cache_config, device, make_requests("eg"), enforce_eager=True)
+
+    _assert_inferencer_outputs_close(out_cg, out_eager)
+    assert any(desc.num_tokens == 4 and desc.num_seqs >= 2 for desc in inferencer_cg._cudagraph_mgr.graphs)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for cudagraph replay")
+def test_inferencer_cudagraph_chunked_prefill_padded_bucket_matches_eager(model, device, model_path, cache_config):
+    generation_config = _cudagraph_generation_config()
+
+    def make_requests(prefix: str) -> list[InferenceRequest]:
+        input_ids_list = [1, 2, 3, 4, 5]
+        return [
+            _make_request(
+                f"{prefix}_0",
+                input_ids_list=input_ids_list,
+                tokens_this_step=len(input_ids_list),
+                num_computed_tokens=len(input_ids_list),
+                block_id=0,
+                generation_config=generation_config,
+            )
+        ]
+
+    out_cg, inferencer_cg = _run_inferencer(
+        model, model_path, cache_config, device, make_requests("cg"), enforce_eager=False, return_inferencer=True
+    )
+    out_eager = _run_inferencer(model, model_path, cache_config, device, make_requests("eg"), enforce_eager=True)
+
+    _assert_inferencer_outputs_close(out_cg, out_eager)
+    assert any(desc.num_tokens == 8 and desc.num_seqs >= 1 for desc in inferencer_cg._cudagraph_mgr.graphs)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for cudagraph replay")
+def test_inferencer_cudagraph_raises_when_no_capture_bucket(model, device, model_path, cache_config):
+    generation_config = _cudagraph_generation_config()
+    input_ids_list = [1, 2, 3, 4, 5]
+    requests = [
+        _make_request(
+            "too_large",
+            input_ids_list=input_ids_list,
+            tokens_this_step=len(input_ids_list),
+            num_computed_tokens=len(input_ids_list),
+            block_id=0,
+            generation_config=generation_config,
+        )
+    ]
+
+    with pytest.raises(RuntimeError, match="no captured descriptor can cover"):
+        _run_inferencer(
+            model,
+            model_path,
+            cache_config,
+            device,
+            requests,
+            enforce_eager=False,
+            max_num_seqs=1,
+            max_num_batched_tokens=4,
+        )

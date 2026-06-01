@@ -31,7 +31,7 @@ def test_generate_simple(vexact_engine):
     prompt_ids = vexact_engine.tokenizer.encode("Hello, world!")
     request = DriverRequest(
         request_id="test_req_1",
-        generation_config=GenerationConfig(max_new_tokens=16),
+        generation_config=GenerationConfig(max_length=len(prompt_ids) + 16, max_new_tokens=16, top_p=1.0),
         input_ids_list=prompt_ids,
     )
 
