@@ -79,13 +79,14 @@ def test_scheduler_batches_and_completes_requests(make_request, kv_cache_manager
         assert req.status == RequestStatus.RUNNING
         assert req.block_ids
 
-    # Second schedule: req-0 moves to decode, and req-1 joins from queue
+    # Second schedule: req-0 moves to decode; req-2 joins from queue
+    # requeued to the tail during first schedule because it didn't fit the token budget).
     scheduler_output = scheduler.schedule()
     batch_to_update = scheduler_output.batch_to_update
-    assert {r.request_id for r in batch_to_update} == {requests[0].request_id, requests[1].request_id}
+    assert {r.request_id for r in batch_to_update} == {requests[0].request_id, requests[2].request_id}
 
-    # Update with EOS token for req-0 and a regular token for req-1
-    # req-0 finishes, req-1 continues
+    # Update with EOS token for req-0 and a regular token for req-2
+    # req-0 finishes, req-2 continues
     infer_result = InferencerOutput(
         token_ids=torch.tensor([2, 999], dtype=torch.long, device=torch.device("cpu")),
         logits=torch.empty(0, dtype=torch.bfloat16, device=torch.device("cpu")),
@@ -93,7 +94,7 @@ def test_scheduler_batches_and_completes_requests(make_request, kv_cache_manager
     )
     scheduler.update(batch_to_update, infer_result)
 
-    # Third schedule: req-1 is in decode, req-2 joins from queue
+    # Third schedule: req-2 is in decode, req-1 joins from queue
     scheduler_output = scheduler.schedule()
     next_batch = scheduler_output.batch_to_infer
     assert {r.request_id for r in next_batch} == {requests[1].request_id, requests[2].request_id}
@@ -197,13 +198,10 @@ def test_scheduler_requeues_when_kv_cache_full(kv_cache_manager):
     assert second_request.block_ids
 
 
-# for testing max prefill number and chunked prefill
+# for testing chunked prefill token budget behavior
 def test_scheduler_chunked_prefill_progresses_and_switches_to_decode(make_request, kv_cache_manager):
-    # Phase 1: Test with max_num_batched_tokens=8, max_num_prefill_seqs=2
-    # Should accept 2 prefill requests with tokens_this_step=3 each
-    scheduler_config = SchedulerConfig(
-        max_num_batched_tokens=8, max_queue_size=4, enable_chunked_prefill=True, max_num_prefill_seqs=2
-    )
+    # Phase 1: token budget is large enough to fit both prefill requests in one step
+    scheduler_config = SchedulerConfig(max_num_batched_tokens=8, max_queue_size=4, enable_chunked_prefill=True)
     scheduler = Scheduler(
         config=scheduler_config,
         kv_cache_manager=kv_cache_manager(),
@@ -225,11 +223,8 @@ def test_scheduler_chunked_prefill_progresses_and_switches_to_decode(make_reques
     assert first_request.num_computed_tokens == 3
     assert second_request.num_computed_tokens == 3
 
-    # Phase 2: Test with max_num_batched_tokens=2, max_num_prefill_seqs=1
-    # Should accept only 1 prefill request with tokens_this_step=2
-    scheduler_config2 = SchedulerConfig(
-        max_num_batched_tokens=2, max_queue_size=4, enable_chunked_prefill=True, max_num_prefill_seqs=1
-    )
+    # Phase 2: tight token budget (max_num_batched_tokens=2) admits only 1 chunked prefill
+    scheduler_config2 = SchedulerConfig(max_num_batched_tokens=2, max_queue_size=4, enable_chunked_prefill=True)
     scheduler2 = Scheduler(
         config=scheduler_config2,
         kv_cache_manager=kv_cache_manager(),
@@ -317,9 +312,7 @@ def test_scheduler_update_processes_outputs_and_finishes_requests(kv_cache_manag
 # test decode and prefill order in scheduler
 def test_scheduler_decode_before_prefill_ordering(make_request, kv_cache_manager):
     """Test that scheduler always schedules decode requests before prefill requests."""
-    scheduler_config = SchedulerConfig(
-        max_num_batched_tokens=5, max_queue_size=10, enable_chunked_prefill=True, max_num_prefill_seqs=2
-    )
+    scheduler_config = SchedulerConfig(max_num_batched_tokens=5, max_queue_size=10, enable_chunked_prefill=True)
     scheduler = Scheduler(
         config=scheduler_config,
         kv_cache_manager=kv_cache_manager(),
@@ -337,7 +330,7 @@ def test_scheduler_decode_before_prefill_ordering(make_request, kv_cache_manager
     assert scheduler.submit_request(req0)
     assert scheduler.submit_request(req1)
 
-    # Schedule 1: Should add req0 and req1 for prefill (2 prefill requests, max_num_prefill_seqs=2)
+    # Schedule 1: Should add req0 and req1 for prefill (both fit within token budget)
     scheduler_output = scheduler.schedule()
     batch1 = scheduler_output.batch_to_infer
     assert len(batch1) == 2
@@ -382,9 +375,7 @@ def test_scheduler_preempts_least_progress_request(kv_cache_manager):
     req_a = InferenceRequest(request_id="req-a", generation_config=gen_config, input_ids_list=[1, 2, 3])
     req_b = InferenceRequest(request_id="req-b", generation_config=gen_config, input_ids_list=[4, 5, 6])
 
-    scheduler_config = SchedulerConfig(
-        max_num_batched_tokens=8, max_queue_size=4, enable_chunked_prefill=False, max_num_prefill_seqs=4
-    )
+    scheduler_config = SchedulerConfig(max_num_batched_tokens=8, max_queue_size=4, enable_chunked_prefill=False)
     scheduler = Scheduler(
         config=scheduler_config,
         kv_cache_manager=kv_cache_manager(page_size=4, max_blocks=2),
@@ -523,7 +514,7 @@ def test_scheduler_pp_fair_share_under_kv_pressure(kv_cache_manager):
     # No active seqs → avg_blocks_per_seq=max(1.0, 0/1)=1.0
     # free_blocks=1, fair_share=max(1,1//2)=1, seqs_budget=min(4, max(1, 1/1.0))=1
     scheduler_config = SchedulerConfig(
-        max_num_batched_tokens=32, max_num_seqs=4, max_num_prefill_seqs=4, max_queue_size=8, enable_chunked_prefill=True
+        max_num_batched_tokens=32, max_num_seqs=4, max_queue_size=8, enable_chunked_prefill=True
     )
     mgr = kv_cache_manager(page_size=4, max_blocks=4)
     scheduler = Scheduler(
@@ -559,7 +550,7 @@ def test_scheduler_pp_no_limit_when_kv_plentiful(kv_cache_manager):
     # No active seqs → avg_blocks_per_seq=1.0
     # free_blocks=64, fair_share=64//2=32, seqs_budget=min(4, max(1, 32/1.0))=4
     scheduler_config = SchedulerConfig(
-        max_num_batched_tokens=32, max_num_seqs=4, max_num_prefill_seqs=4, max_queue_size=8, enable_chunked_prefill=True
+        max_num_batched_tokens=32, max_num_seqs=4, max_queue_size=8, enable_chunked_prefill=True
     )
     mgr = kv_cache_manager(page_size=4, max_blocks=64)
     scheduler = Scheduler(
@@ -623,9 +614,7 @@ def test_preempt_resubmit_produces_same_results(kv_cache_manager):
     # --- Run 1: baseline with plenty of KV (no preemption) ---
     baseline_req = InferenceRequest(request_id="baseline", generation_config=gen_config, input_ids_list=list(prompt))
     sched_baseline = Scheduler(
-        config=SchedulerConfig(
-            max_num_batched_tokens=8, max_queue_size=4, enable_chunked_prefill=False, max_num_prefill_seqs=4
-        ),
+        config=SchedulerConfig(max_num_batched_tokens=8, max_queue_size=4, enable_chunked_prefill=False),
         kv_cache_manager=kv_cache_manager(page_size=4, max_blocks=64),
         pp_info=PPInfo(1, 0),
     )
@@ -646,9 +635,7 @@ def test_preempt_resubmit_produces_same_results(kv_cache_manager):
         input_ids_list=[40, 50, 60],
     )
     sched_tight = Scheduler(
-        config=SchedulerConfig(
-            max_num_batched_tokens=8, max_queue_size=4, enable_chunked_prefill=False, max_num_prefill_seqs=4
-        ),
+        config=SchedulerConfig(max_num_batched_tokens=8, max_queue_size=4, enable_chunked_prefill=False),
         kv_cache_manager=kv_cache_manager(page_size=4, max_blocks=3),
         pp_info=PPInfo(1, 0),
     )
