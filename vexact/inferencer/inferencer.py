@@ -183,7 +183,6 @@ class Inferencer:
                 max_seqlen_q=gen_ctx.max_seqlen_q,
                 generation_configs=gen_ctx.generation_configs,
                 tokens_generated=gen_ctx.tokens_generated,
-                is_decode_only=gen_ctx.is_decode_only,
             )
             self._pp_messager.send_gen_ctx(intermediate_output)
 
@@ -276,10 +275,6 @@ class Inferencer:
         batch_input_ids = torch.from_numpy(np.array(current_sequences, dtype=np.int64)).to(self.device).unsqueeze(0)
         batch_position_ids = torch.from_numpy(np.concatenate(position_ids_sequences)).to(self.device).unsqueeze(0)
 
-        is_decode_only = all(
-            req.num_computed_tokens - req.tokens_this_step >= len(req.input_ids_list) for req in requests
-        )
-
         return GenerationContext(
             batch_input_ids=batch_input_ids,
             intermediate_tensors=None,
@@ -291,7 +286,6 @@ class Inferencer:
             max_seqlen_q=max_seqlen_q,
             generation_configs=[req.generation_config for req in requests],
             tokens_generated=[len(req.generated_tokens) for req in requests],
-            is_decode_only=is_decode_only,
         )
 
     def _prepare_input_buffers_from_gen_ctx(

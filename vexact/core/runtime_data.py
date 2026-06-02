@@ -128,7 +128,6 @@ class GenerationContext:
     max_seqlen_q: int | None
     generation_configs: list[GenerationConfig]
     tokens_generated: list[int]
-    is_decode_only: bool = False
 
 
 @dataclass
