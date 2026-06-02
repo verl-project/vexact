@@ -116,8 +116,9 @@ class InferenceRequest:
                 return True
 
         # Check for maximum length
-        if self.num_computed_tokens + 1 >= self.generation_config.max_length:
-            return True
+        if self.generation_config.max_length is not None:
+            if self.num_computed_tokens + 1 >= self.generation_config.max_length:
+                return True
 
         # Check for max_new_tokens
         if len(self.generated_tokens) >= self.generation_config.max_new_tokens:

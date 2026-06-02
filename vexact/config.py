@@ -237,10 +237,6 @@ class SchedulerConfig:
         metadata={"help": "Maximum number of query tokens per batch."},
     )
     max_num_seqs: int = field(default=2048, metadata={"help": "Maximum number of sequences per batch."})
-    max_num_prefill_seqs: int = field(
-        default=1,
-        metadata={"help": "Maximum number of sequences for prefill."},
-    )
     max_queue_size: int = field(
         default=0,
         metadata={"help": "Maximum number of requests in the waiting queue. 0 means infinite."},

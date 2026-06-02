@@ -125,6 +125,7 @@ async def _run_test(vexact_engine, samples, timeout_s: float | None):
                 max_length=vexact_engine.config.model.max_model_len,
                 do_sample=True,
                 temperature=1,
+                top_p=1.0,
                 output_scores=True,
                 output_hidden_states=True,
                 return_dict_in_generate=True,

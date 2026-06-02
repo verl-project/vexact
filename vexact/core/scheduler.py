@@ -84,7 +84,6 @@ class Scheduler:
 
         self._result_queue: queue.Queue[InferenceRequest] = queue.Queue()
         self._enable_chunked_prefill = config.enable_chunked_prefill
-        self._max_num_prefill_seqs = config.max_num_prefill_seqs
 
     @property
     def _active_requests(self) -> OrderedDict[str, InferenceRequest]:
@@ -119,7 +118,6 @@ class Scheduler:
         """
         # Plan tokens for existing active requests and extend KV cache blocks
         available_token_budget = self.max_num_batched_tokens
-        prefill_seqs_budget = self._max_num_prefill_seqs
         for request in list(self._active_requests.values()):
             if request.request_id not in self._active_requests:
                 # Request was preempted during a prior iteration
@@ -134,8 +132,6 @@ class Scheduler:
                 continue
 
             available_token_budget -= tokens
-            if request.num_computed_tokens < len(request.input_ids_list):
-                prefill_seqs_budget -= 1
 
         # Distribute new sequence admissions evenly across batch slots to fill pipeline bubbles.
         # Derive budget from free blocks and average per-sequence block usage so it self-adjusts dynamically.
@@ -148,7 +144,7 @@ class Scheduler:
             seqs_budget = min(seqs_budget, max(1, int(fair_share_blocks / avg_blocks_per_seq)))
 
         # Try to fill remaining capacity with new requests from queue
-        while available_token_budget > 0 and prefill_seqs_budget > 0 and seqs_budget > 0:
+        while available_token_budget > 0 and seqs_budget > 0:
             try:
                 # If completely idle, block on queue to avoid busy-waiting
                 if self.total_inflight_request_count() == 0:
@@ -170,7 +166,6 @@ class Scheduler:
                     # A naive strategy, if this request cannot be fit in, just quit
                     # It's possible that there's other request in the queue that can
                     # be fit in
-                    prefill_seqs_budget -= 1
                     seqs_budget -= 1
                 else:
                     self._request_queue.put(request)
