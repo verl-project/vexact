@@ -101,7 +101,7 @@ class Sampler:
 
         device = logits.device
         num_reqs = logits.shape[0]
-        idx_mapping = torch.arange(num_reqs, device=device, dtype=torch.long)
+        idx_mapping = torch.arange(num_reqs, device=device, dtype=torch.int32)
         seed_tensor = torch.tensor(seeds, device=device, dtype=torch.int64)
         temperature_tensor = torch.full((num_reqs,), temperature, device=device, dtype=torch.float32)
         pos_tensor = sampling_positions.to(device=device, dtype=torch.long)
