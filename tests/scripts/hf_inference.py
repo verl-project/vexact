@@ -154,6 +154,7 @@ def save_completed_requests_data(completed_requests: list[InferenceRequest], out
             "total_tokens": prompt_len + response_len,
             "processing_time": req.processing_time,
             "status": req.status.value,
+            "seed": getattr(req.generation_config, "seed", None),
         }
 
     # Save logits
@@ -246,6 +247,12 @@ def parse_arguments():
         "--do_sample",
         action="store_true",
         help="Use sampling instead of greedy decoding",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for deterministic sampling.",
     )
 
     parser.add_argument(
@@ -552,7 +559,7 @@ def simulate_concurrent_requests(args, engine: DriverWorker, tokenizer, generati
     start_time = time.time()
 
     for i in range(args.simulate_requests):
-        request_id = f"sim_req_{uuid.uuid4().hex[:8]}"
+        request_id = f"sim_req_{i:04d}" if args.seed is not None else f"sim_req_{uuid.uuid4().hex[:8]}"
         # 'prompt = '"1+1=?"
         # prompt = "Tell me about artificial intelligence"
         prompt = "The old lighthouse keeper, who had spent nearly forty years watching over the rocky coastline and guiding ships safely through the treacherous waters during countless storms, finally decided on a misty autumn morning that it was time to retire and pass the responsibility to someone younger, someone with sharper eyes and steadier hands, though he knew he would deeply miss the solitary beauty of the crashing waves, the calls of the seabirds at dawn, the smell of salt air, and especially those quiet moments at sunset when the world seemed to pause and he felt truly at peace with his life's work.Retry"  # noqa: E501
@@ -716,6 +723,7 @@ def main():
         logger.info(f"Top-p: {args.top_p}")
         logger.info(f"Top-k: {args.top_k}")
         logger.info(f"Do sample: {args.do_sample}")
+        logger.info(f"Seed: {args.seed}")
         logger.info(f"attn_impl: {args.attn_impl}")
         logger.info("=" * 60)
 
@@ -749,6 +757,8 @@ def main():
             output_hidden_states=True,
             return_dict_in_generate=True,
         )
+        if args.seed is not None:
+            generation_config.seed = args.seed
 
         # Run continuous batching mode
         run_continuous_batching(args, tokenizer, generation_config)

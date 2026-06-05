@@ -18,15 +18,29 @@ from torch import Tensor
 from transformers import GenerationConfig
 
 
+try:
+    from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p as vllm_apply_top_k_top_p
+    from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample as vllm_gumbel_sample
+except ImportError:
+    vllm_apply_top_k_top_p = None
+    vllm_gumbel_sample = None
+
+
 class Sampler:
     @proton.cpu_timed_scope("_batch_sample_token")
     @torch.inference_mode()
-    def batch_sample_token(self, batched_logits: Tensor, gen_configs: list[GenerationConfig]) -> Tensor:
+    def batch_sample_token(
+        self,
+        batched_logits: Tensor,
+        gen_configs: list[GenerationConfig],
+        sampling_positions: Tensor | None = None,
+    ) -> Tensor:
         """Batch sample next tokens for a batch of logits and generation configs.
 
         Args:
             batched_logits: Tensor of shape (batch_size, vocab_size)
             gen_configs: Sequence of GenerationConfig objects for each item in the batch
+            sampling_positions: Absolute token positions for each sampled row.
         """
 
         batched_logits = batched_logits.to(torch.float32)
@@ -40,6 +54,15 @@ class Sampler:
         temp = gen_configs[0].temperature
         do_sample = gen_configs[0].do_sample and gen_configs[0].temperature > 0 and float(p) > 0
         if do_sample:
+            seeds = [getattr(gen_config, "seed", None) for gen_config in gen_configs]
+            has_seed = [seed is not None for seed in seeds]
+            if any(has_seed):
+                if not all(has_seed):
+                    raise ValueError("Seeded sampling requires every request in the batch to set seed.")
+                if sampling_positions is None:
+                    raise ValueError("sampling_positions must be set for seeded sampling.")
+                if vllm_gumbel_sample is None:
+                    raise ImportError("vLLM is required for seeded sampling but is not importable.")
             if k is not None:
                 k = torch.full((batched_logits.shape[0],), int(k), device=batched_logits.device)
             if p is not None:
@@ -49,15 +72,48 @@ class Sampler:
                 batched_logits.div_(temp)
             # apply top-k and top-p
             logits = self.apply_top_k_top_p(batched_logits, k, p)
-            # sample tokens
-            probs = torch.softmax(logits, dim=-1)
-            # TODO: support per-request random seed
-            next_tokens = self._random_sample(probs, generators={})
+            if any(has_seed):
+                next_tokens = self._seeded_sample(
+                    logits, [int(seed) for seed in seeds], sampling_positions, float(temp)
+                )
+            else:
+                # sample tokens
+                probs = torch.softmax(logits, dim=-1)
+                next_tokens = self._random_sample(probs, generators={})
         else:
             # greedy
             next_tokens = batched_logits.argmax(dim=-1).view(-1)
 
         return next_tokens.to(device=batched_logits.device, dtype=torch.long)
+
+    @proton.cpu_timed_scope("_seeded_sample")
+    @torch.inference_mode()
+    def _seeded_sample(
+        self,
+        logits: Tensor,
+        seeds: list[int],
+        sampling_positions: Tensor,
+        temperature: float,
+    ) -> Tensor:
+        """Sample with vLLM's per-request seeded Triton Gumbel kernel."""
+        if vllm_gumbel_sample is None:
+            raise ImportError("vLLM is required for seeded sampling but is not importable.")
+
+        device = logits.device
+        num_reqs = logits.shape[0]
+        idx_mapping = torch.arange(num_reqs, device=device, dtype=torch.int32)
+        seed_tensor = torch.tensor(seeds, device=device, dtype=torch.int64)
+        temperature_tensor = torch.full((num_reqs,), temperature, device=device, dtype=torch.float32)
+        pos_tensor = sampling_positions.to(device=device, dtype=torch.long)
+
+        return vllm_gumbel_sample(
+            logits,
+            idx_mapping,
+            temperature_tensor,
+            seed_tensor,
+            pos_tensor,
+            apply_temperature=False,
+        )
 
     @proton.cpu_timed_scope("_random_sample")
     @torch.inference_mode()
@@ -96,6 +152,8 @@ class Sampler:
         """
         Reference: https://github.com/vllm-project/vllm/blob/8e2a469b3b2f67bc900ed72724fe3f05e3564994/vllm/v1/sample/ops/topk_topp_sampler.py#L243
         """
+        if vllm_apply_top_k_top_p is not None:
+            return vllm_apply_top_k_top_p(batched_logits, k, p)
 
         if p is None:
             if k is None:
