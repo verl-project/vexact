@@ -228,6 +228,7 @@ class VeXactServer:
         top_k = sampling_params.pop("top_k", self.config.top_k)
         repetition_penalty = sampling_params.pop("repetition_penalty", self.config.repetition_penalty)
         do_sample = sampling_params.pop("do_sample", self.config.do_sample)
+        seed = sampling_params.pop("seed", None)
 
         logprobs_requested = sampling_params.pop("logprobs", False)
         if isinstance(logprobs_requested, int):
@@ -250,6 +251,8 @@ class VeXactServer:
             output_hidden_states=True,
             return_dict_in_generate=True,
         )
+        if seed is not None:
+            gen_config.seed = seed
 
         request = DriverRequest(
             request_id=request_id,

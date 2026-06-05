@@ -16,6 +16,7 @@
 
 import multiprocessing
 
+import msgspec
 import pytest
 from transformers import GenerationConfig
 
@@ -95,6 +96,25 @@ def cleanup_server(process: multiprocessing.Process):
     process.join(timeout=2)
     if process.is_alive():
         process.kill()
+
+
+def test_driver_request_preserves_generation_config_seed():
+    generation_config = GenerationConfig(max_new_tokens=10)
+    generation_config.seed = 12345
+    request = DriverRequest(
+        request_id="seeded_req",
+        generation_config=generation_config,
+        input_ids_list=[1, 2, 3],
+    )
+
+    encoder = msgspec.msgpack.Encoder(enc_hook=DriverRequest.enc_hook)
+    decoder = msgspec.msgpack.Decoder(DriverRequest, dec_hook=DriverRequest.dec_hook)
+    decoded = decoder.decode(encoder.encode(request))
+
+    assert decoded.request_id == request.request_id
+    assert decoded.input_ids_list == request.input_ids_list
+    assert decoded.generation_config.max_new_tokens == 10
+    assert decoded.generation_config.seed == 12345
 
 
 class TestRequestChannel:

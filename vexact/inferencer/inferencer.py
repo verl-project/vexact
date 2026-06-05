@@ -419,7 +419,9 @@ class Inferencer:
             for gen_config in gen_configs
         )
         assert uniform_sampling
-        batch_tokens = self.sampler.batch_sample_token(batched_logits, gen_configs)
+        # vLLM seeded sampling keys RNG by request seed and token position.
+        sampling_positions = gen_ctx.context_lens.to(dtype=torch.long) - 1
+        batch_tokens = self.sampler.batch_sample_token(batched_logits, gen_configs, sampling_positions)
 
         if sample_ref.output_logits:
             logits = batched_logits.detach()
