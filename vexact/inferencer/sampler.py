@@ -17,6 +17,7 @@ import triton.profiler as proton
 from torch import Tensor
 from transformers import GenerationConfig
 
+
 try:
     from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p as vllm_apply_top_k_top_p
     from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample as vllm_gumbel_sample
