@@ -25,7 +25,7 @@ from vexact.batch_invariant_ops import (
 )
 from vexact.config import CacheConfig, ModelConfig, PPInfo, SchedulerConfig, VeXactConfig
 from vexact.core.request import InferenceRequest
-from vexact.core.runtime_data import InferencerOutput
+from vexact.core.runtime_data import GenerationContext, InferencerOutput
 from vexact.inferencer.cudagraph_utils import CudaGraphManager
 from vexact.inferencer.inferencer import Inferencer
 from vexact.inferencer.model_loader import ModelCreator, load_weights_from_weight_path
@@ -145,6 +145,18 @@ def test_inferencer_generates_expected_token(
         assert torch.equal(result.logits[i].cpu(), baseline_inferenceroutput.logits[i])
 
 
+def _real_token_hidden_states(hidden_states: torch.Tensor, gen_ctx: GenerationContext) -> torch.Tensor:
+    num_tokens = gen_ctx.batch_position_ids.shape[1]
+    return hidden_states[:, :num_tokens, :]
+
+
+def _assert_tensor_on_device(tensor: torch.Tensor, device: torch.device) -> None:
+    expected_device = torch.device(device)
+    assert tensor.device.type == expected_device.type
+    if expected_device.index is not None:
+        assert tensor.device.index == expected_device.index
+
+
 def test_pp_first_rank(repo_root, model_config, model_path, cache_config, inference_request, device):
     pp_info = PPInfo(3, 0)
     model_creator = ModelCreator(model_config, model_path, device, pp_info)
@@ -168,7 +180,9 @@ def test_pp_first_rank(repo_root, model_config, model_path, cache_config, infere
     intermediate_outputs = inferencer._forward(gen_ctx)
 
     expected_intermediate = torch.load(repo_root / "tests/ref_data/first_rank_intermediate.pt")
-    assert torch.equal(intermediate_outputs.hidden_states, expected_intermediate)
+    actual_intermediate = _real_token_hidden_states(intermediate_outputs.hidden_states, gen_ctx)
+    _assert_tensor_on_device(actual_intermediate, device)
+    assert torch.equal(actual_intermediate.cpu(), expected_intermediate.cpu())
 
 
 def test_pp_mid_rank(repo_root, model_config, model_path, cache_config, inference_request, device):
@@ -196,7 +210,9 @@ def test_pp_mid_rank(repo_root, model_config, model_path, cache_config, inferenc
     intermediate_outputs = inferencer._forward(gen_ctx)
 
     expected_intermediate = torch.load(repo_root / "tests/ref_data/mid_rank_intermediate.pt")
-    assert torch.equal(intermediate_outputs.hidden_states, expected_intermediate)
+    actual_intermediate = _real_token_hidden_states(intermediate_outputs.hidden_states, gen_ctx)
+    _assert_tensor_on_device(actual_intermediate, device)
+    assert torch.equal(actual_intermediate.cpu(), expected_intermediate.cpu())
 
 
 def test_pp_last_rank(
