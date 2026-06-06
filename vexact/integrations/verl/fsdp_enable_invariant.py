@@ -12,17 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
 from vexact.batch_invariant_ops import (
     enable_batch_invariant_mode,
     is_batch_invariant_mode_enabled,
+    triton_flash_attention_forward,
 )
+from vexact.models.register import register_models as _register_models
 
 
 if not is_batch_invariant_mode_enabled():
     enable_batch_invariant_mode()
 
-from vexact.models.register import register_models as _register_models
-
-
+ALL_ATTENTION_FUNCTIONS["triton-invariant"] = triton_flash_attention_forward
 _register_models()
 print("fsdp worker batch invariant enabled.")

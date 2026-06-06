@@ -45,6 +45,7 @@ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from vexact.batch_invariant_ops import flash_attention_forward as flash_attention_forward_impl
 from vexact.batch_invariant_ops import flash_attention_forward_cute as flash_attention_forward_cute_impl
 from vexact.batch_invariant_ops import flex_attention_forward
+from vexact.batch_invariant_ops import triton_flash_attention_forward as triton_flash_attention_forward_impl
 from vexact.config import PPInfo
 from vexact.inferencer.model_loader import ModelCreator
 from vexact.models.register import register_models as _register_models
@@ -63,6 +64,7 @@ _register_models()
 ALL_ATTENTION_FUNCTIONS["flex"] = flex_attention_forward
 ALL_ATTENTION_FUNCTIONS["fa-invariant"] = flash_attention_forward_impl
 ALL_ATTENTION_FUNCTIONS["fa-invariant-cute"] = flash_attention_forward_cute_impl
+ALL_ATTENTION_FUNCTIONS["triton-invariant"] = triton_flash_attention_forward_impl
 
 
 def _patch_lazy_imports_for_fa4():
@@ -530,6 +532,8 @@ def run_batch_inference(
     position_ids: torch.Tensor,
     enable_batch_invariant: bool,
     logger,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """
     Run batch inference to get logits, then run backward pass to check gradients.
@@ -556,17 +560,30 @@ def run_batch_inference(
             model.__class__.forward.__module__,
             getattr(model.__class__.forward, "__name__", "<no_name>"),
         )
-
         # Run in train mode to enable gradient computation
         with set_batch_invariant_mode(True):
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                use_cache=False,
-                return_dict=True,
-                num_splits=1,
-            )
+            if cu_seqlens is None or max_seqlen is None:
+                outputs = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    use_cache=False,
+                    return_dict=True,
+                    num_splits=1,
+                )
+            else:
+                outputs = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    cu_seq_lens_q=cu_seqlens,
+                    cu_seq_lens_k=cu_seqlens,
+                    max_length_q=max_seqlen,
+                    max_length_k=max_seqlen,
+                    use_cache=False,
+                    return_dict=True,
+                    num_splits=1,
+                )
     else:
         raise NotImplementedError
 
@@ -1167,6 +1184,9 @@ def main():
         logger.info("Qwen3-MoE Triton patch: %s", "enabled" if args.use_fused_lce else "disabled")
         logger.info("=" * 80)
 
+        if args.attn_impl == "triton-invariant" and not args.use_remove_padding:
+            raise ValueError("triton-invariant verification requires --use_remove_padding")
+
         # Load saved data
         saved_logits, saved_logprobs, all_token_ids, metadata = load_saved_data(args.data_dir, logger)
 
@@ -1198,6 +1218,8 @@ def main():
                 position_ids,
                 args.enable_batch_invariant,
                 logger,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
             )
             # when using triton fused kernels, logits would not be materialized
             if batch_logits is not None:

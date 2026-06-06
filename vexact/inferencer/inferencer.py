@@ -30,6 +30,7 @@ from vexact.batch_invariant_ops import (
 )
 from vexact.batch_invariant_ops import flash_attention_forward as flash_attention_forward_impl
 from vexact.batch_invariant_ops import flash_attention_forward_cute as flash_attention_forward_cute_impl
+from vexact.batch_invariant_ops import triton_flash_attention_forward as triton_flash_attention_forward_impl
 from vexact.batch_invariant_ops.kv_cache_context import (
     KVCacheStore,
     set_kv_cache_context,
@@ -47,10 +48,11 @@ from vexact.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 # Module-level logger
 logger = logging.getLogger(__name__)
 
-# Register two invariant attention implementations
+# Register invariant attention implementations.
 ALL_ATTENTION_FUNCTIONS["flex"] = flex_attention_forward
 ALL_ATTENTION_FUNCTIONS["fa-invariant"] = flash_attention_forward_impl
 ALL_ATTENTION_FUNCTIONS["fa-invariant-cute"] = flash_attention_forward_cute_impl
+ALL_ATTENTION_FUNCTIONS["triton-invariant"] = triton_flash_attention_forward_impl
 
 
 class Inferencer:
