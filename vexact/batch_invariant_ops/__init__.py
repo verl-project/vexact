@@ -27,8 +27,8 @@ from .batch_invariant_ops import (
 )
 from .flash_attention import flash_attention_forward, flash_attention_forward_cute
 from .flex_attention import flex_attention_forward
-from .oai_fused_attn import flash_attention_forward as triton_flash_attention_forward
-from .oai_fused_attn import flash_attn_varlen_func as triton_flash_attn_varlen_func
+from .triton_invariant_attention import flash_attention_forward as triton_flash_attention_forward
+from .triton_invariant_attention import flash_attn_varlen_func as triton_flash_attn_varlen_func
 
 
 __version__ = "0.1.0"

@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 
 from vexact.batch_invariant_ops.kv_cache_context import set_kv_cache_context
-from vexact.batch_invariant_ops.oai_fused_attn import flash_attention_forward, flash_attn_varlen_func
+from vexact.batch_invariant_ops.triton_invariant_attention import flash_attention_forward, flash_attn_varlen_func
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for Triton attention tests")
