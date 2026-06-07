@@ -231,18 +231,20 @@ def load_model_and_tokenizer(
     device: torch.device,
     logger,
     attn_impl: str = "eager",
-    use_remove_padding: bool = True,
+    model_backend: str = "hf",
     use_fused_lce: bool = True,
 ) -> tuple:
     """
-    Load HuggingFace model and tokenizer.
+    Load the verifier model and tokenizer.
 
     Args:
         model_path: Path to the model or model name
         device: Device to load the model on
         logger: Logger instance
         attn_impl: Attention implementation to use
-        use_fused_lce: enable VeRL monkey patch with torch backend to use fused LCE kernel.
+        model_backend: Model loader backend. "hf" uses Transformers/ModelCreator,
+            "veomni" uses VeOmni build_foundation_model.
+        use_fused_lce: enable VeOmni fused per-token logprob path.
 
     Returns:
         Tuple of (model, tokenizer)
@@ -256,34 +258,49 @@ def load_model_and_tokenizer(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Load model
-    model_kwargs = {
-        "torch_dtype": torch.bfloat16,
-        "device_map": "auto" if torch.cuda.is_available() else "cpu",
-        "trust_remote_code": True,
-        "_attn_implementation": attn_impl,
-    }
-    config = AutoConfig.from_pretrained(model_path, **model_kwargs)
-    if config.model_type in ("qwen3_moe", "deepseek_v3"):
-        # Use ModelCreator to load with vexact patches (fused experts, patched attention).
-        # This avoids issues with custom auto_map model classes rejecting non-standard attn_implementation.
-        logger.info("Loading model using ModelCreator (from_config + custom weights)")
-        TorchMemorySaverAdapter.create(enable=False)
-        pp_info = PPInfo(pp_rank=0, pp_size=1)
-        model = ModelCreator(config, model_path=model_path, device=device, pp_info=pp_info).create_model()
-    else:
-        logger.info("Loading model using AutoModelForCausalLM")
-        model = AutoModelForCausalLM.from_pretrained(model_path, **model_kwargs)
+    if model_backend == "veomni":
+        from veomni.arguments import OpsImplementationConfig
+        from veomni.models import build_foundation_model
 
-    if use_fused_lce:
-        from verl.models.transformers.monkey_patch import apply_monkey_patch
-
-        logger.info(f"Applying Verl Triton forward patch with use_remove_padding={use_remove_padding}")
-        apply_monkey_patch(
-            model, use_remove_padding=use_remove_padding, use_fused_kernels=True, fused_kernels_backend="torch"
+        logger.info("Loading model using VeOmni build_foundation_model")
+        ops_implementation = OpsImplementationConfig(
+            attn_implementation=attn_impl,
+            moe_implementation="eager",
+            cross_entropy_loss_implementation="chunk_loss" if use_fused_lce else "eager",
+            rms_norm_implementation="eager",
+            swiglu_mlp_implementation="eager",
+            rotary_pos_emb_implementation="eager",
+            load_balancing_loss_implementation="eager",
         )
+        model = build_foundation_model(
+            config_path=model_path,
+            weights_path=model_path,
+            torch_dtype="bfloat16",
+            attn_implementation=attn_impl,
+            init_device="cuda" if device.type == "cuda" else "cpu",
+            ops_implementation=ops_implementation,
+        )
+        model.to(device)
     else:
-        logger.info("Skipping Verl Triton forward patch")
+        model_kwargs = {
+            "torch_dtype": torch.bfloat16,
+            "device_map": "auto" if torch.cuda.is_available() else "cpu",
+            "trust_remote_code": True,
+            "_attn_implementation": attn_impl,
+        }
+        config = AutoConfig.from_pretrained(model_path, **model_kwargs)
+        if config.model_type in ("qwen3_moe", "deepseek_v3"):
+            logger.info("Loading model using ModelCreator (from_config + custom weights)")
+            TorchMemorySaverAdapter.create(enable=False)
+            pp_info = PPInfo(pp_rank=0, pp_size=1)
+            model = ModelCreator(config, model_path=model_path, device=device, pp_info=pp_info).create_model()
+        else:
+            logger.info("Loading model using AutoModelForCausalLM")
+            model = AutoModelForCausalLM.from_pretrained(model_path, **model_kwargs)
+
+        if use_fused_lce:
+            raise ValueError("--use_fused_lce requires --model_backend veomni")
+        logger.info("Skipping fused LCE for HuggingFace backend")
 
     logger.info("Model loaded successfully")
     logger.info(f"Model type: {type(model)}")
@@ -406,18 +423,15 @@ def prepare_batch_inputs_remove_padding(
         position_ids_list.append(torch.arange(seq_len, dtype=torch.long))
     position_ids = torch.cat(position_ids_list, dim=0).unsqueeze(0).to(device)  # [1, total_tokens]
 
-    # Create cumulative sequence lengths for indexing
-    # cu_seqlens[i] is the start position of sequence i in the concatenated tensor
-    cu_seqlens = torch.tensor(
-        [0] + list(torch.cumsum(torch.tensor(seq_lens), dim=0).numpy()),
-        dtype=torch.int32,
-        device=device,
-    )
+    cu_seqlens_list = [0]
+    for seq_len in seq_lens:
+        cu_seqlens_list.append(cu_seqlens_list[-1] + seq_len)
+    cu_seqlens = torch.tensor(cu_seqlens_list, dtype=torch.int32, device=device)
 
     logger.info(f"Input IDs shape: {input_ids.shape}")
     logger.info(f"Attention mask shape: {attention_mask.shape}")
     logger.info(f"Position IDs shape: {position_ids.shape}")
-    logger.info(f"Cumulative sequence lengths: {cu_seqlens.tolist()}")
+    logger.info(f"Cumulative sequence lengths: {cu_seqlens_list}")
 
     # Return additional metadata needed for extraction
     return (
@@ -427,6 +441,7 @@ def prepare_batch_inputs_remove_padding(
         request_ids,
         prompt_lens,
         cu_seqlens,
+        cu_seqlens_list,
         max_seqlen,
     )
 
@@ -436,7 +451,7 @@ def extract_generated_logits_remove_padding(
     request_ids: list[str],
     metadata: dict,
     prompt_lens: list[int],
-    cu_seqlens: torch.Tensor,
+    cu_seqlens: list[int],
     logger,
 ) -> dict[str, list[torch.Tensor]]:
     """
@@ -468,8 +483,8 @@ def extract_generated_logits_remove_padding(
         response_len = metadata[req_id]["response_len"]
 
         # Get start and end positions in concatenated sequence
-        seq_start = cu_seqlens[i].item()
-        seq_end = cu_seqlens[i + 1].item()
+        seq_start = cu_seqlens[i]
+        seq_end = cu_seqlens[i + 1]
 
         # Extract this sequence's logits
         seq_logits = batch_logits[seq_start:seq_end, :]  # [seq_len, vocab_size]
@@ -534,6 +549,7 @@ def run_batch_inference(
     logger,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: int | None = None,
+    use_fused_lce: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """
     Run batch inference to get logits, then run backward pass to check gradients.
@@ -561,6 +577,8 @@ def run_batch_inference(
             getattr(model.__class__.forward, "__name__", "<no_name>"),
         )
         # Run in train mode to enable gradient computation
+        labels = input_ids if use_fused_lce else None
+        lce_kwargs = {"labels": labels, "return_log_probs": True} if use_fused_lce else {}
         with set_batch_invariant_mode(True):
             if cu_seqlens is None or max_seqlen is None:
                 outputs = model(
@@ -570,6 +588,7 @@ def run_batch_inference(
                     use_cache=False,
                     return_dict=True,
                     num_splits=1,
+                    **lce_kwargs,
                 )
             else:
                 outputs = model(
@@ -583,13 +602,17 @@ def run_batch_inference(
                     use_cache=False,
                     return_dict=True,
                     num_splits=1,
+                    **lce_kwargs,
                 )
     else:
         raise NotImplementedError
 
     logger.info("Model output type: %s, has log_probs: %s", type(outputs), hasattr(outputs, "log_probs"))
     logits = outputs.logits
+    fused_linear_aux = getattr(outputs, "fused_linear_aux", None)
     log_probs = getattr(outputs, "log_probs", None)
+    if log_probs is None and fused_linear_aux is not None:
+        log_probs = getattr(fused_linear_aux, "log_probs", None)
     if log_probs is not None:
         log_probs = _reshape_logprobs(log_probs, input_ids.shape)
     else:
@@ -605,7 +628,7 @@ def run_batch_inference(
         masked_log_probs = log_probs * attention_mask
         loss = -masked_log_probs.sum() / attention_mask.sum()
 
-        logger.info(f"Computed loss from log_probs: {loss.item():.6f}")
+        logger.info("Computed loss from log_probs: %s", loss.detach())
 
         # Zero gradients before backward
         model.zero_grad()
@@ -615,9 +638,9 @@ def run_batch_inference(
 
         # Compute total gradient norm
         grad_norm = compute_grad_norm(model.parameters())
-        logger.info(f"Total gradient norm: {grad_norm.item():.6e}")
+        logger.info("Total gradient norm: %s", grad_norm.detach())
 
-        assert grad_norm.item() != 0.0, " grad_norm should not be zero. Please debug the fused lce computation."
+        assert torch.count_nonzero(grad_norm) != 0, "grad_norm should not be zero. Please debug fused lce computation."
 
     else:
         logger.warning("Cannot run backward: log_probs is None")
@@ -722,7 +745,7 @@ def extract_generated_logprobs_remove_padding(
     request_ids: list[str],
     metadata: dict,
     prompt_lens: list[int],
-    cu_seqlens: torch.Tensor,
+    cu_seqlens: list[int],
     logger,
 ) -> dict[str, list[torch.Tensor]]:
     """
@@ -751,8 +774,8 @@ def extract_generated_logprobs_remove_padding(
         response_len = metadata[req_id]["response_len"]
 
         # Get start and end positions in concatenated sequence
-        seq_start = cu_seqlens[i].item()
-        seq_end = cu_seqlens[i + 1].item()
+        seq_start = cu_seqlens[i]
+        seq_end = cu_seqlens[i + 1]
 
         # Extract this sequence's logprobs
         seq_logprobs = batch_logprobs[seq_start:seq_end]  # [seq_len]
@@ -1143,6 +1166,14 @@ def parse_arguments():
     )
 
     parser.add_argument(
+        "--model_backend",
+        type=str,
+        choices=["hf", "veomni"],
+        default="hf",
+        help="Model backend to use for fresh batch inference (default: hf)",
+    )
+
+    parser.add_argument(
         "--enable_batch_invariant",
         action="store_true",
         help="Enable batch invariant mode for deterministic inference",
@@ -1157,7 +1188,7 @@ def parse_arguments():
     parser.add_argument(
         "--use_fused_lce",
         action="store_true",
-        help="Enable VeRL FusedLienarForPPO forward patch",
+        help="Enable VeOmni fused per-token logprob path",
     )
 
     return parser.parse_args()
@@ -1180,12 +1211,15 @@ def main():
         logger.info(f"Relative tolerance: {args.rtol}")
         logger.info(f"Absolute tolerance: {args.atol}")
         logger.info(f"Attention implementation: {args.attn_impl}")
+        logger.info(f"Model backend: {args.model_backend}")
         logger.info(f"Batch invariant mode: {'enabled' if args.enable_batch_invariant else 'disabled'}")
-        logger.info("Qwen3-MoE Triton patch: %s", "enabled" if args.use_fused_lce else "disabled")
+        logger.info("Fused LCE: %s", "enabled" if args.use_fused_lce else "disabled")
         logger.info("=" * 80)
 
         if args.attn_impl == "triton-invariant" and not args.use_remove_padding:
             raise ValueError("triton-invariant verification requires --use_remove_padding")
+        if args.use_fused_lce and args.model_backend != "veomni":
+            raise ValueError("--use_fused_lce requires --model_backend veomni")
 
         # Load saved data
         saved_logits, saved_logprobs, all_token_ids, metadata = load_saved_data(args.data_dir, logger)
@@ -1196,7 +1230,7 @@ def main():
             device,
             logger,
             args.attn_impl,
-            use_remove_padding=args.use_remove_padding,
+            model_backend=args.model_backend,
             use_fused_lce=args.use_fused_lce,
         )
 
@@ -1208,6 +1242,7 @@ def main():
                 request_ids,
                 prompt_lens,
                 cu_seqlens,
+                cu_seqlens_list,
                 max_seqlen,
             ) = prepare_batch_inputs_remove_padding(all_token_ids, metadata, tokenizer, device, logger)
 
@@ -1220,11 +1255,12 @@ def main():
                 logger,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
+                use_fused_lce=args.use_fused_lce,
             )
             # when using triton fused kernels, logits would not be materialized
             if batch_logits is not None:
                 fresh_logits = extract_generated_logits_remove_padding(
-                    batch_logits, request_ids, metadata, prompt_lens, cu_seqlens, logger
+                    batch_logits, request_ids, metadata, prompt_lens, cu_seqlens_list, logger
                 )
             else:
                 fresh_logits = None
@@ -1232,7 +1268,7 @@ def main():
             # Extract logprobs if available
             if batch_logprobs is not None:
                 fresh_logprobs = extract_generated_logprobs_remove_padding(
-                    batch_logprobs, request_ids, metadata, prompt_lens, cu_seqlens, logger
+                    batch_logprobs, request_ids, metadata, prompt_lens, cu_seqlens_list, logger
                 )
             else:
                 fresh_logprobs = None
@@ -1254,6 +1290,7 @@ def main():
                 position_ids,
                 args.enable_batch_invariant,
                 logger,
+                use_fused_lce=args.use_fused_lce,
             )
 
             # Extract generated token logits
@@ -1323,6 +1360,12 @@ def main():
 
         # Return exit code based on results
         success = True
+        if logits_results is None and logprobs_results is None:
+            logger.error("No logits or logprobs comparison was run.")
+            success = False
+        if args.use_fused_lce and logprobs_results is None:
+            logger.error("--use_fused_lce requires a logprobs comparison.")
+            success = False
         if logits_match is False:
             success = False
         if logprobs_match is False:

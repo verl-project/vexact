@@ -62,10 +62,13 @@ def _eager_attention(q_seq, k_seq, v_seq, softmax_scale, causal=True):
     if causal:
         q_len = q_seq.shape[0]
         kv_len = k_seq.shape[0]
-        q_pos = torch.arange(q_len, device=q_seq.device) + max(kv_len - q_len, 0)
+        q_pos = torch.arange(q_len, device=q_seq.device) + (kv_len - q_len)
         kv_pos = torch.arange(kv_len, device=q_seq.device)
-        scores = scores.masked_fill(~(kv_pos.unsqueeze(0) <= q_pos.unsqueeze(1)).unsqueeze(0), float("-inf"))
+        causal_mask = kv_pos.unsqueeze(0) <= q_pos.unsqueeze(1)
+        scores = scores.masked_fill(~causal_mask.unsqueeze(0), float("-inf"))
     probs = torch.softmax(scores, dim=-1).to(v_seq.dtype)
+    if causal:
+        probs = torch.where(causal_mask.any(dim=-1)[None, :, None], probs, 0.0)
     return torch.matmul(probs, v_t).transpose(0, 1)
 
 
@@ -156,7 +159,7 @@ def _run_paged(q_seqs, k_seqs, v_seqs, page_size, *, page_kw="page_table"):
         (torch.bfloat16, 3e-2, 3e-2),
     ],
 )
-def test_triton_flash_attn_varlen_nonpaged_oai_backward(dtype, atol, rtol):
+def test_triton_flash_attn_varlen_nonpaged_packed_backward(dtype, atol, rtol):
     torch.manual_seed(0)
     q_lens = [65, 129]
     kv_lens = [65, 129]
@@ -208,7 +211,7 @@ def test_triton_flash_attn_varlen_nonpaged_requires_max_seqlen():
         flash_attn_varlen_func(q, k, v, cu_seqlens, cu_seqlens, max_seqlen_k=1)
 
 
-def test_triton_flash_attn_varlen_nonpaged_decode_oai_backward():
+def test_triton_flash_attn_varlen_nonpaged_decode_packed_backward():
     torch.manual_seed(10)
     q_lens = [1, 17]
     kv_lens = [65, 129]
@@ -266,6 +269,35 @@ def test_triton_flash_attn_varlen_nonpaged_gqa_backward_matches_eager(q_lens, kv
         dtype=torch.float32,
         atol=5e-3,
         rtol=5e-3,
+    )
+
+
+def test_triton_flash_attn_varlen_nonpaged_q_longer_than_k_matches_eager():
+    torch.manual_seed(303)
+    _assert_nonpaged_backward_matches_eager(
+        [5, 9],
+        [2, 4],
+        q_heads=4,
+        kv_heads=2,
+        head_dim=32,
+        dtype=torch.float32,
+        atol=2e-3,
+        rtol=2e-3,
+    )
+
+
+@pytest.mark.parametrize("head_dim", [40, 96])
+def test_triton_flash_attn_varlen_nonpaged_arbitrary_head_dim_backward_matches_eager(head_dim):
+    torch.manual_seed(202)
+    _assert_nonpaged_backward_matches_eager(
+        [9, 23],
+        [41, 57],
+        q_heads=6,
+        kv_heads=3,
+        head_dim=head_dim,
+        dtype=torch.float32,
+        atol=7e-3,
+        rtol=7e-3,
     )
 
 

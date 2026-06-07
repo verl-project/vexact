@@ -792,9 +792,6 @@ class _attention(torch.autograd.Function):
         return dq, dk, dv, None, None, None, None
 
 
-_oai_attention = _attention.apply
-
-
 def _require_cuda(name: str, tensor: torch.Tensor) -> None:
     if not tensor.is_cuda:
         raise ValueError(f"{name} must be a CUDA tensor")
@@ -829,74 +826,390 @@ def _as_python_int(value, name: str) -> int:
     return int(value)
 
 
-def _make_query_metadata(cu_seqlens_q: torch.Tensor, total_q: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    q_lens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(torch.long)
-    seq_ids = torch.repeat_interleave(
-        torch.arange(q_lens.numel(), device=cu_seqlens_q.device, dtype=torch.int32),
-        q_lens,
-        output_size=total_q,
+@triton.jit
+def _varlen_attn_fwd_block_kernel(
+    Q,
+    K,
+    V,
+    OUT,
+    LSE,
+    CU_SEQLENS_Q,
+    CU_SEQLENS_K,
+    stride_qt: tl.constexpr,
+    stride_qh: tl.constexpr,
+    stride_qd: tl.constexpr,
+    stride_kt: tl.constexpr,
+    stride_kh: tl.constexpr,
+    stride_kd: tl.constexpr,
+    stride_vt: tl.constexpr,
+    stride_vh: tl.constexpr,
+    stride_vd: tl.constexpr,
+    stride_ot: tl.constexpr,
+    stride_oh: tl.constexpr,
+    stride_od: tl.constexpr,
+    stride_lt: tl.constexpr,
+    stride_lh: tl.constexpr,
+    softmax_scale: tl.constexpr,
+    num_q_heads: tl.constexpr,
+    num_kv_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    value_head_dim: tl.constexpr,
+    causal: tl.constexpr,
+    BF16_OUTPUT: tl.constexpr,
+    FP32_OUTPUT: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    seq_id = tl.program_id(0)
+    start_m = tl.program_id(1)
+    q_head = tl.program_id(2)
+    kv_head = q_head // (num_q_heads // num_kv_heads)
+
+    q_start = tl.load(CU_SEQLENS_Q + seq_id)
+    q_end = tl.load(CU_SEQLENS_Q + seq_id + 1)
+    k_start = tl.load(CU_SEQLENS_K + seq_id)
+    k_end = tl.load(CU_SEQLENS_K + seq_id + 1)
+    q_len = q_end - q_start
+    kv_len = k_end - k_start
+    q_abs_start = kv_len - q_len
+    if start_m * BLOCK_M >= kv_len or (start_m + 1) * BLOCK_M <= q_abs_start:
+        return
+
+    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_d = tl.arange(0, BLOCK_D)
+    valid_q = (offs_m >= q_abs_start) & (offs_m < kv_len)
+    q_local = tl.where(valid_q, offs_m - q_abs_start, 0)
+    q = tl.load(
+        Q + (q_start + q_local)[:, None] * stride_qt + q_head * stride_qh + offs_d[None, :] * stride_qd,
+        mask=valid_q[:, None] & (offs_d[None, :] < head_dim),
+        other=0.0,
     )
-    seq_starts = torch.repeat_interleave(cu_seqlens_q[:-1], q_lens, output_size=total_q)
-    local_offsets = torch.arange(total_q, device=cu_seqlens_q.device, dtype=torch.int32) - seq_starts
-    return q_lens, seq_ids, local_offsets
 
+    if BF16_OUTPUT:
+        dtype = tl.bfloat16
+    elif FP32_OUTPUT:
+        dtype = tl.float32
+    else:
+        dtype = tl.float16
 
-def _nonpaged_varlen_attention_with_oai_fwd_bwd(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
-    cu_seqlens_k: torch.Tensor,
-    *,
-    softmax_scale: float,
-    causal: bool,
-    max_seqlen_q: int,
-    max_seqlen_k: int,
-) -> torch.Tensor:
-    if q.ndim != 3 or k.ndim != 3 or v.ndim != 3:
-        raise ValueError("non-paged flash_attn_varlen_func expects q/k/v with shape (total_tokens, heads, head_dim)")
-    if q.shape[-1] != k.shape[-1]:
-        raise ValueError(f"q and k head_dim must match, got {q.shape[-1]} and {k.shape[-1]}")
-    if k.shape[-2] != v.shape[-2]:
-        raise ValueError(f"k/v must have the same number of KV heads, got {k.shape[-2]} and {v.shape[-2]}")
-    if q.shape[-2] % k.shape[-2] != 0:
-        raise ValueError(f"query heads ({q.shape[-2]}) must be divisible by KV heads ({k.shape[-2]})")
-    if not causal:
-        raise NotImplementedError(
-            "non-paged triton flash_attn_varlen_func currently reuses oai backward for causal=True"
+    qk_scale = softmax_scale * 1.44269504
+    m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32) + 1.0
+    acc = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
+
+    start_n = 0
+    while start_n < start_m * BLOCK_M:
+        offs_n = start_n + tl.arange(0, BLOCK_N)
+        valid_n = offs_n < kv_len
+        k_local = tl.where(valid_n, offs_n, 0)
+        k = tl.load(
+            K + (k_start + k_local)[:, None] * stride_kt + kv_head * stride_kh + offs_d[None, :] * stride_kd,
+            mask=valid_n[:, None] & (offs_d[None, :] < head_dim),
+            other=0.0,
         )
+        qk = tl.dot(q, tl.trans(k))
+        m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
+        qk = qk * qk_scale - m_ij[:, None]
+        p = tl.math.exp2(qk)
+        alpha = tl.math.exp2(m_i - m_ij)
 
-    num_seqs = cu_seqlens_q.numel() - 1
-    padded_len = triton.cdiv(max(max_seqlen_q, max_seqlen_k), 128) * 128
+        v_val = tl.load(
+            V + (k_start + k_local)[:, None] * stride_vt + kv_head * stride_vh + offs_d[None, :] * stride_vd,
+            mask=valid_n[:, None] & (offs_d[None, :] < value_head_dim),
+            other=0.0,
+        )
+        p = p.to(dtype)
+        v_val = v_val.to(p.dtype)
+        acc = tl.dot(p, v_val, acc * alpha[:, None])
+        l_i = l_i * alpha + tl.sum(p, 1)
+        m_i = m_ij
+        start_n += BLOCK_N
 
-    q_lens, q_seq_ids, q_local_offsets = _make_query_metadata(cu_seqlens_q, q.shape[0])
-    k_lens, k_seq_ids, k_local_offsets = _make_query_metadata(cu_seqlens_k, k.shape[0])
+    start_n = start_m * BLOCK_M
+    while start_n < (start_m + 1) * BLOCK_M:
+        offs_n = start_n + tl.arange(0, BLOCK_N)
+        valid_n = offs_n < kv_len
+        k_local = tl.where(valid_n, offs_n, 0)
+        k = tl.load(
+            K + (k_start + k_local)[:, None] * stride_kt + kv_head * stride_kh + offs_d[None, :] * stride_kd,
+            mask=valid_n[:, None] & (offs_d[None, :] < head_dim),
+            other=0.0,
+        )
+        qk = tl.dot(q, tl.trans(k))
+        if causal:
+            mask = offs_m[:, None] >= offs_n[None, :]
+            qk = qk * qk_scale + tl.where(mask, 0, -1.0e6)
+            m_ij = tl.maximum(m_i, tl.max(qk, 1))
+            qk -= m_ij[:, None]
+        else:
+            m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
+            qk = qk * qk_scale - m_ij[:, None]
+        p = tl.math.exp2(qk)
+        alpha = tl.math.exp2(m_i - m_ij)
+        v_val = tl.load(
+            V + (k_start + k_local)[:, None] * stride_vt + kv_head * stride_vh + offs_d[None, :] * stride_vd,
+            mask=valid_n[:, None] & (offs_d[None, :] < value_head_dim),
+            other=0.0,
+        )
+        p = p.to(dtype)
+        v_val = v_val.to(p.dtype)
+        acc = tl.dot(p, v_val, acc * alpha[:, None])
+        l_i = l_i * alpha + tl.sum(p, 1)
+        m_i = m_ij
+        start_n += BLOCK_N
 
-    q_padded = q.new_zeros((num_seqs, padded_len, q.shape[1], q.shape[2]))
-    k_padded = k.new_zeros((num_seqs, padded_len, k.shape[1], k.shape[2]))
-    v_padded = v.new_zeros((num_seqs, padded_len, v.shape[1], v.shape[2]))
-    q_padded_offsets = (k_lens - q_lens)[q_seq_ids.long()].to(torch.long) + q_local_offsets.long()
-    q_padded[q_seq_ids.long(), q_padded_offsets] = q
-    k_padded[k_seq_ids.long(), k_local_offsets.long()] = k
-    v_padded[k_seq_ids.long(), k_local_offsets.long()] = v
-
-    groups = q.shape[1] // k.shape[1]
-    if groups != 1:
-        k_padded = k_padded.repeat_interleave(groups, dim=2)
-        v_padded = v_padded.repeat_interleave(groups, dim=2)
-
-    oai_out = _oai_attention(
-        q_padded.transpose(1, 2).contiguous(),
-        k_padded.transpose(1, 2).contiguous(),
-        v_padded.transpose(1, 2).contiguous(),
-        causal,
-        softmax_scale,
-        False,
+    out = acc / l_i[:, None]
+    tl.store(
+        OUT + (q_start + q_local)[:, None] * stride_ot + q_head * stride_oh + offs_d[None, :] * stride_od,
+        out.to(dtype),
+        mask=valid_q[:, None] & (offs_d[None, :] < value_head_dim),
     )
-    if oai_out.requires_grad:
-        oai_out.register_hook(lambda grad: grad.contiguous())
+    tl.store(
+        LSE + (q_start + q_local) * stride_lt + q_head * stride_lh,
+        (m_i + tl.math.log2(l_i)) * 0.6931471824645996,
+        mask=valid_q,
+    )
 
-    return oai_out.transpose(1, 2)[q_seq_ids.long(), q_padded_offsets]
+
+@triton.jit
+def _varlen_attn_bwd_dq_kernel(
+    Q,
+    K,
+    V,
+    OUT,
+    DO,
+    LSE,
+    DQ,
+    CU_SEQLENS_Q,
+    CU_SEQLENS_K,
+    stride_qt: tl.constexpr,
+    stride_qh: tl.constexpr,
+    stride_qd: tl.constexpr,
+    stride_kt: tl.constexpr,
+    stride_kh: tl.constexpr,
+    stride_kd: tl.constexpr,
+    stride_vt: tl.constexpr,
+    stride_vh: tl.constexpr,
+    stride_vd: tl.constexpr,
+    stride_ot: tl.constexpr,
+    stride_oh: tl.constexpr,
+    stride_od: tl.constexpr,
+    stride_dt: tl.constexpr,
+    stride_dh: tl.constexpr,
+    stride_dd: tl.constexpr,
+    stride_lt: tl.constexpr,
+    stride_lh: tl.constexpr,
+    stride_dqt: tl.constexpr,
+    stride_dqh: tl.constexpr,
+    stride_dqd: tl.constexpr,
+    softmax_scale: tl.constexpr,
+    num_q_heads: tl.constexpr,
+    num_kv_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    value_head_dim: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    seq_id = tl.program_id(0)
+    start_m = tl.program_id(1)
+    q_head = tl.program_id(2)
+    kv_head = q_head // (num_q_heads // num_kv_heads)
+
+    q_start = tl.load(CU_SEQLENS_Q + seq_id)
+    q_end = tl.load(CU_SEQLENS_Q + seq_id + 1)
+    k_start = tl.load(CU_SEQLENS_K + seq_id)
+    k_end = tl.load(CU_SEQLENS_K + seq_id + 1)
+    q_len = q_end - q_start
+    kv_len = k_end - k_start
+    q_abs_start = kv_len - q_len
+    if start_m * BLOCK_M >= q_len:
+        return
+
+    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_d = tl.arange(0, BLOCK_D)
+    valid_q = offs_m < q_len
+    q_abs = offs_m + q_abs_start
+    q = tl.load(
+        Q + (q_start + offs_m)[:, None] * stride_qt + q_head * stride_qh + offs_d[None, :] * stride_qd,
+        mask=valid_q[:, None] & (offs_d[None, :] < head_dim),
+        other=0.0,
+    )
+    do = tl.load(
+        DO + (q_start + offs_m)[:, None] * stride_dt + q_head * stride_dh + offs_d[None, :] * stride_dd,
+        mask=valid_q[:, None] & (offs_d[None, :] < value_head_dim),
+        other=0.0,
+    )
+    out = tl.load(
+        OUT + (q_start + offs_m)[:, None] * stride_ot + q_head * stride_oh + offs_d[None, :] * stride_od,
+        mask=valid_q[:, None] & (offs_d[None, :] < value_head_dim),
+        other=0.0,
+    )
+    lse = tl.load(
+        LSE + (q_start + offs_m) * stride_lt + q_head * stride_lh,
+        mask=valid_q,
+        other=0.0,
+    )
+    delta = tl.sum(out.to(tl.float32) * do.to(tl.float32), axis=1)
+    dq = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
+
+    start_n = 0
+    while start_n < kv_len:
+        offs_n = start_n + tl.arange(0, BLOCK_N)
+        valid_n = offs_n < kv_len
+        k_local = tl.where(valid_n, offs_n, 0)
+        k = tl.load(
+            K + (k_start + k_local)[:, None] * stride_kt + kv_head * stride_kh + offs_d[None, :] * stride_kd,
+            mask=valid_n[:, None] & (offs_d[None, :] < head_dim),
+            other=0.0,
+        )
+        v_val = tl.load(
+            V + (k_start + k_local)[:, None] * stride_vt + kv_head * stride_vh + offs_d[None, :] * stride_vd,
+            mask=valid_n[:, None] & (offs_d[None, :] < value_head_dim),
+            other=0.0,
+        )
+        qk = tl.dot(q, tl.trans(k)) * softmax_scale
+        mask = valid_q[:, None] & valid_n[None, :] & (q_abs[:, None] >= offs_n[None, :])
+        p = tl.exp(qk - lse[:, None])
+        p = tl.where(mask, p, 0.0)
+        dp = tl.dot(do, tl.trans(v_val))
+        ds = p * (dp - delta[:, None]) * softmax_scale
+        dq += tl.dot(ds.to(k.dtype), k)
+        start_n += BLOCK_N
+
+    tl.store(
+        DQ + (q_start + offs_m)[:, None] * stride_dqt + q_head * stride_dqh + offs_d[None, :] * stride_dqd,
+        dq,
+        mask=valid_q[:, None] & (offs_d[None, :] < head_dim),
+    )
+
+
+@triton.jit
+def _varlen_attn_bwd_dkv_kernel(
+    Q,
+    K,
+    V,
+    OUT,
+    DO,
+    LSE,
+    DK,
+    DV,
+    CU_SEQLENS_Q,
+    CU_SEQLENS_K,
+    stride_qt: tl.constexpr,
+    stride_qh: tl.constexpr,
+    stride_qd: tl.constexpr,
+    stride_kt: tl.constexpr,
+    stride_kh: tl.constexpr,
+    stride_kd: tl.constexpr,
+    stride_vt: tl.constexpr,
+    stride_vh: tl.constexpr,
+    stride_vd: tl.constexpr,
+    stride_ot: tl.constexpr,
+    stride_oh: tl.constexpr,
+    stride_od: tl.constexpr,
+    stride_dt: tl.constexpr,
+    stride_dh: tl.constexpr,
+    stride_dd: tl.constexpr,
+    stride_lt: tl.constexpr,
+    stride_lh: tl.constexpr,
+    stride_dkt: tl.constexpr,
+    stride_dkh: tl.constexpr,
+    stride_dkd: tl.constexpr,
+    stride_dvt: tl.constexpr,
+    stride_dvh: tl.constexpr,
+    stride_dvd: tl.constexpr,
+    softmax_scale: tl.constexpr,
+    num_q_heads: tl.constexpr,
+    num_kv_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    value_head_dim: tl.constexpr,
+    GROUPS: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    seq_id = tl.program_id(0)
+    start_n_block = tl.program_id(1)
+    kv_head = tl.program_id(2)
+
+    q_start = tl.load(CU_SEQLENS_Q + seq_id)
+    q_end = tl.load(CU_SEQLENS_Q + seq_id + 1)
+    k_start = tl.load(CU_SEQLENS_K + seq_id)
+    k_end = tl.load(CU_SEQLENS_K + seq_id + 1)
+    q_len = q_end - q_start
+    kv_len = k_end - k_start
+    q_abs_start = kv_len - q_len
+    start_n = start_n_block * BLOCK_N
+    if start_n >= kv_len:
+        return
+
+    offs_n = start_n + tl.arange(0, BLOCK_N)
+    offs_d = tl.arange(0, BLOCK_D)
+    valid_n = offs_n < kv_len
+    k_local = tl.where(valid_n, offs_n, 0)
+    k = tl.load(
+        K + (k_start + k_local)[:, None] * stride_kt + kv_head * stride_kh + offs_d[None, :] * stride_kd,
+        mask=valid_n[:, None] & (offs_d[None, :] < head_dim),
+        other=0.0,
+    )
+    v_val = tl.load(
+        V + (k_start + k_local)[:, None] * stride_vt + kv_head * stride_vh + offs_d[None, :] * stride_vd,
+        mask=valid_n[:, None] & (offs_d[None, :] < value_head_dim),
+        other=0.0,
+    )
+    dk = tl.zeros((BLOCK_N, BLOCK_D), dtype=tl.float32)
+    dv = tl.zeros((BLOCK_N, BLOCK_D), dtype=tl.float32)
+
+    for group_idx in range(GROUPS):
+        q_head = kv_head * GROUPS + group_idx
+        start_m = 0
+        while start_m < q_len:
+            offs_m = start_m + tl.arange(0, BLOCK_M)
+            valid_q = offs_m < q_len
+            q_abs = offs_m + q_abs_start
+            q = tl.load(
+                Q + (q_start + offs_m)[:, None] * stride_qt + q_head * stride_qh + offs_d[None, :] * stride_qd,
+                mask=valid_q[:, None] & (offs_d[None, :] < head_dim),
+                other=0.0,
+            )
+            do = tl.load(
+                DO + (q_start + offs_m)[:, None] * stride_dt + q_head * stride_dh + offs_d[None, :] * stride_dd,
+                mask=valid_q[:, None] & (offs_d[None, :] < value_head_dim),
+                other=0.0,
+            )
+            out = tl.load(
+                OUT + (q_start + offs_m)[:, None] * stride_ot + q_head * stride_oh + offs_d[None, :] * stride_od,
+                mask=valid_q[:, None] & (offs_d[None, :] < value_head_dim),
+                other=0.0,
+            )
+            lse = tl.load(
+                LSE + (q_start + offs_m) * stride_lt + q_head * stride_lh,
+                mask=valid_q,
+                other=0.0,
+            )
+            delta = tl.sum(out.to(tl.float32) * do.to(tl.float32), axis=1)
+            qk = tl.dot(q, tl.trans(k)) * softmax_scale
+            mask = valid_q[:, None] & valid_n[None, :] & (q_abs[:, None] >= offs_n[None, :])
+            p = tl.exp(qk - lse[:, None])
+            p = tl.where(mask, p, 0.0)
+            dp = tl.dot(do, tl.trans(v_val))
+            ds = p * (dp - delta[:, None]) * softmax_scale
+            dv += tl.dot(tl.trans(p).to(do.dtype), do)
+            dk += tl.dot(tl.trans(ds).to(q.dtype), q)
+            start_m += BLOCK_M
+
+    tl.store(
+        DK + (k_start + k_local)[:, None] * stride_dkt + kv_head * stride_dkh + offs_d[None, :] * stride_dkd,
+        dk,
+        mask=valid_n[:, None] & (offs_d[None, :] < head_dim),
+    )
+    tl.store(
+        DV + (k_start + k_local)[:, None] * stride_dvt + kv_head * stride_dvh + offs_d[None, :] * stride_dvd,
+        dv,
+        mask=valid_n[:, None] & (offs_d[None, :] < value_head_dim),
+    )
 
 
 @triton.jit
@@ -1164,19 +1477,6 @@ class _PagedFlashAttentionVarlen(torch.autograd.Function):
         raise NotImplementedError("paged triton flash_attn_varlen_func backward is not implemented")
 
 
-def _make_token_page_cache(
-    k: torch.Tensor,
-    v: torch.Tensor,
-    cu_seqlens_k: torch.Tensor,
-    *,
-    max_seqlen_k: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    kv_lens = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
-    logical_pages = torch.arange(max_seqlen_k, device=k.device, dtype=torch.int32)
-    page_table = cu_seqlens_k[:-1, None] + logical_pages[None, :]
-    return k.unsqueeze(1), v.unsqueeze(1), page_table, kv_lens
-
-
 class _NonpagedFlashAttentionVarlen(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -1197,20 +1497,64 @@ class _NonpagedFlashAttentionVarlen(torch.autograd.Function):
             raise ValueError(f"cu_seqlens_q must be on {q.device}, got {cu_seqlens_q.device}")
         if cu_seqlens_k.device != q.device:
             raise ValueError(f"cu_seqlens_k must be on {q.device}, got {cu_seqlens_k.device}")
-        k_cache, v_cache, page_table, seqused_k = _make_token_page_cache(k, v, cu_seqlens_k, max_seqlen_k=max_seqlen_k)
-        out = _PagedFlashAttentionVarlen.apply(
+        if q.ndim != 3 or k.ndim != 3 or v.ndim != 3:
+            raise ValueError(
+                "non-paged flash_attn_varlen_func expects q/k/v with shape (total_tokens, heads, head_dim)"
+            )
+        if q.shape[-1] != k.shape[-1]:
+            raise ValueError(f"q and k head_dim must match, got {q.shape[-1]} and {k.shape[-1]}")
+        if k.shape[-2] != v.shape[-2]:
+            raise ValueError(f"k/v must have the same number of KV heads, got {k.shape[-2]} and {v.shape[-2]}")
+        if q.shape[-2] % k.shape[-2] != 0:
+            raise ValueError(f"query heads ({q.shape[-2]}) must be divisible by KV heads ({k.shape[-2]})")
+        if not causal:
+            raise NotImplementedError("non-paged triton flash_attn_varlen_func only supports causal=True")
+
+        out = torch.zeros((q.shape[0], q.shape[1], v.shape[-1]), device=q.device, dtype=q.dtype)
+        lse = torch.empty((q.shape[0], q.shape[1]), device=q.device, dtype=torch.float32)
+        block_d = triton.next_power_of_2(max(q.shape[-1], v.shape[-1]))
+        if block_d > 128:
+            raise ValueError(f"head_dim must be <= 128, got {q.shape[-1]}")
+
+        grid = (cu_seqlens_q.numel() - 1, triton.cdiv(max(max_seqlen_q, max_seqlen_k), 128), q.shape[1])
+        _varlen_attn_fwd_block_kernel[grid](
             q,
-            k_cache,
-            v_cache,
+            k,
+            v,
+            out,
+            lse,
             cu_seqlens_q,
-            seqused_k,
-            page_table,
+            cu_seqlens_k,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            out.stride(0),
+            out.stride(1),
+            out.stride(2),
+            lse.stride(0),
+            lse.stride(1),
             softmax_scale,
+            q.shape[1],
+            k.shape[1],
+            q.shape[-1],
+            v.shape[-1],
             causal,
-            0,
+            BF16_OUTPUT=q.dtype == torch.bfloat16,
+            FP32_OUTPUT=q.dtype == torch.float32,
+            BLOCK_M=128,
+            BLOCK_N=64,
+            BLOCK_D=block_d,
+            num_warps=4,
+            num_stages=3,
         )
 
-        ctx.save_for_backward(q, k, v, cu_seqlens_q, cu_seqlens_k)
+        ctx.save_for_backward(q, k, v, out, lse, cu_seqlens_q, cu_seqlens_k)
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.max_seqlen_q = max_seqlen_q
@@ -1219,23 +1563,113 @@ class _NonpagedFlashAttentionVarlen(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, do: torch.Tensor):
-        q, k, v, cu_seqlens_q, cu_seqlens_k = ctx.saved_tensors
-        with torch.enable_grad():
-            q_detached = q.detach().requires_grad_(True)
-            k_detached = k.detach().requires_grad_(True)
-            v_detached = v.detach().requires_grad_(True)
-            out = _nonpaged_varlen_attention_with_oai_fwd_bwd(
-                q_detached,
-                k_detached,
-                v_detached,
-                cu_seqlens_q,
-                cu_seqlens_k,
-                softmax_scale=ctx.softmax_scale,
-                causal=ctx.causal,
-                max_seqlen_q=ctx.max_seqlen_q,
-                max_seqlen_k=ctx.max_seqlen_k,
-            )
-            dq, dk, dv = torch.autograd.grad(out, (q_detached, k_detached, v_detached), do.contiguous())
+        q, k, v, out, lse, cu_seqlens_q, cu_seqlens_k = ctx.saved_tensors
+        if not ctx.causal:
+            raise NotImplementedError("non-paged triton flash_attn_varlen_func backward only supports causal=True")
+        if do.stride(-1) != 1:
+            do = do.contiguous()
+
+        dq = torch.empty_like(q)
+        dk = torch.empty_like(k)
+        dv = torch.empty_like(v)
+        block_d = triton.next_power_of_2(max(q.shape[-1], v.shape[-1]))
+        if block_d > 128:
+            raise ValueError(f"head_dim must be <= 128, got {q.shape[-1]}")
+        block_m = 64 if block_d <= 64 else 32
+        block_n = 64 if block_d <= 64 else 32
+        groups = q.shape[1] // k.shape[1]
+        num_warps = 4 if block_d <= 64 else 8
+
+        dq_grid = (cu_seqlens_q.numel() - 1, triton.cdiv(ctx.max_seqlen_q, block_m), q.shape[1])
+        _varlen_attn_bwd_dq_kernel[dq_grid](
+            q,
+            k,
+            v,
+            out,
+            do,
+            lse,
+            dq,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            out.stride(0),
+            out.stride(1),
+            out.stride(2),
+            do.stride(0),
+            do.stride(1),
+            do.stride(2),
+            lse.stride(0),
+            lse.stride(1),
+            dq.stride(0),
+            dq.stride(1),
+            dq.stride(2),
+            ctx.softmax_scale,
+            q.shape[1],
+            k.shape[1],
+            q.shape[-1],
+            v.shape[-1],
+            BLOCK_M=block_m,
+            BLOCK_N=block_n,
+            BLOCK_D=block_d,
+            num_warps=num_warps,
+            num_stages=3,
+        )
+
+        dkv_grid = (cu_seqlens_k.numel() - 1, triton.cdiv(ctx.max_seqlen_k, block_n), k.shape[1])
+        _varlen_attn_bwd_dkv_kernel[dkv_grid](
+            q,
+            k,
+            v,
+            out,
+            do,
+            lse,
+            dk,
+            dv,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            out.stride(0),
+            out.stride(1),
+            out.stride(2),
+            do.stride(0),
+            do.stride(1),
+            do.stride(2),
+            lse.stride(0),
+            lse.stride(1),
+            dk.stride(0),
+            dk.stride(1),
+            dk.stride(2),
+            dv.stride(0),
+            dv.stride(1),
+            dv.stride(2),
+            ctx.softmax_scale,
+            q.shape[1],
+            k.shape[1],
+            q.shape[-1],
+            v.shape[-1],
+            groups,
+            BLOCK_M=block_m,
+            BLOCK_N=block_n,
+            BLOCK_D=block_d,
+            num_warps=num_warps,
+            num_stages=3,
+        )
         return dq, dk, dv, None, None, None, None, None, None
 
 
