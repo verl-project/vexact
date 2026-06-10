@@ -53,6 +53,8 @@ def _ensure_config_compat(config):
     """
     if not hasattr(config, "qk_head_dim"):
         config.qk_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
+    if not hasattr(config, "num_local_experts"):
+        config.num_local_experts = config.n_routed_experts
     if not hasattr(config, "head_dim"):
         config.head_dim = config.qk_rope_head_dim
     if not hasattr(config, "rope_interleave"):
