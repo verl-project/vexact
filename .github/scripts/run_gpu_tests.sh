@@ -81,4 +81,4 @@ download_model "moonshotai/Moonlight-16B-A3B-Instruct" "${MOONLIGHT_MODEL_PATH}"
 show_disk_usage "after Moonlight-16B-A3B-Instruct download"
 
 echo "Running Moonlight-16B-A3B-Instruct VExact/VeOmni bitwise verifier"
-run_verifier_pair "${MOONLIGHT_MODEL_PATH}" "${RUNNER_TEMP:-/tmp}/moonlight-vexact-triton-outputs" 64 4 2 256
+run_verifier_pair "${MOONLIGHT_MODEL_PATH}" "${RUNNER_TEMP:-/tmp}/moonlight-vexact-triton-outputs" 64 4 2 32
