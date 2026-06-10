@@ -81,6 +81,7 @@ def inference_request(tokenizer) -> InferenceRequest:
         max_new_tokens=20,
         max_length=100,
         do_sample=False,
+        top_p=1.0,
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
     )
