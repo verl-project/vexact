@@ -69,7 +69,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip3 install uv==0.9.8
-          uv sync --frozen --extra gpu --extra dev
+          uv sync --frozen --extra gpu --extra dev --extra veomni
 
       - name: Run GPU smoke tests
         run: |
