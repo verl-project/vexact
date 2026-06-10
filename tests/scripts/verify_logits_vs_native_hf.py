@@ -265,9 +265,11 @@ def load_model_and_tokenizer(
         from veomni.models import build_foundation_model
 
         logger.info("Loading model using VeOmni build_foundation_model")
+        moe_implementation = os.getenv("VEXACT_TESTS_MOE_IMPL", "eager")
+        logger.info("VeOmni MoE implementation: %s", moe_implementation)
         ops_implementation = OpsImplementationConfig(
             attn_implementation=attn_impl,
-            moe_implementation="eager",
+            moe_implementation=moe_implementation,
             cross_entropy_loss_implementation="chunk_loss" if use_fused_lce else "eager",
             rms_norm_implementation="eager",
             swiglu_mlp_implementation="eager",
