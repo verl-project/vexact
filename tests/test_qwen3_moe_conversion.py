@@ -62,7 +62,8 @@ def _make_expert_weight(config: Qwen3MoeConfig, expert_idx: int, proj: str) -> t
         if proj == "down_proj"
         else (config.moe_intermediate_size, config.hidden_size)
     )
-    return torch.full(shape, float(expert_idx + 1))
+    proj_offset = {"gate_proj": 0.1, "up_proj": 0.2, "down_proj": 0.3}[proj]
+    return torch.full(shape, float(expert_idx + 1) + proj_offset)
 
 
 def test_moe_block_init_uses_fused_experts():
@@ -76,8 +77,7 @@ def test_load_qwen3_moe_weights_single_expert_updates():
     config = _build_test_config()
     model = _DummyModel(config)
     with torch.no_grad():
-        model.block.experts.gate_proj.zero_()
-        model.block.experts.up_proj.zero_()
+        model.block.experts.gate_up_proj.zero_()
         model.block.experts.down_proj.zero_()
 
     weight_items = []
@@ -87,8 +87,18 @@ def test_load_qwen3_moe_weights_single_expert_updates():
 
     loaded_blocks = load_qwen3_moe_weights(model, weight_items, tied_weight_keys=["lm_head.weight"])
     assert loaded_blocks == 1
-    torch.testing.assert_close(model.block.experts.gate_proj[0], _make_expert_weight(config, 0, "gate_proj"))
-    torch.testing.assert_close(model.block.experts.gate_proj[1], torch.zeros_like(model.block.experts.gate_proj[1]))
+    torch.testing.assert_close(
+        model.block.experts.gate_up_proj[0, : config.moe_intermediate_size, :],
+        _make_expert_weight(config, 0, "gate_proj"),
+    )
+    torch.testing.assert_close(
+        model.block.experts.gate_up_proj[0, config.moe_intermediate_size :, :],
+        _make_expert_weight(config, 0, "up_proj"),
+    )
+    torch.testing.assert_close(
+        model.block.experts.gate_up_proj[1],
+        torch.zeros_like(model.block.experts.gate_up_proj[1]),
+    )
 
 
 def test_qwen3_moe_load_weights_ties_embed_tokens_and_loads_experts():
