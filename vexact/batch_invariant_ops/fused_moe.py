@@ -469,12 +469,10 @@ def fused_moe_forward(
     hidden_states = hidden_states.bfloat16()
     from vexact.utils.device import DEVICE_MAJOR
 
-    if DEVICE_MAJOR == 9:
-        expert_fn = FusedMoeExpertFunction
-    elif DEVICE_MAJOR == 10:
+    if DEVICE_MAJOR >= 9:
         expert_fn = QuackFusedMoeExpertFunction
     else:
-        raise NotImplementedError(f"Unsupported device major version: {DEVICE_MAJOR}")
+        expert_fn = FusedMoeExpertFunction
 
     final_hidden_states = expert_fn.apply(
         num_experts,

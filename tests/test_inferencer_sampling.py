@@ -32,44 +32,34 @@ def _batch_sample_token_ref(
     Returns:
         Sampled token indices of shape (batch_size,)
     """
-    # Extract sampling parameters from configs
-    temperatures = [config.temperature for config in gen_configs]
-    top_ks = [0 if config.top_k is None else config.top_k for config in gen_configs]
-    top_ps = [1.0 if config.top_p is None else config.top_p for config in gen_configs]
+    sampler = Sampler()
+    gen_config = gen_configs[0]
+
+    top_k = gen_config.top_k
+    top_p = gen_config.top_p
+    assert top_p is not None, "top_p must be set (use 1.0 to disable)"
+    if top_k is not None and int(top_k) <= 0:
+        top_k = None
+    temperature = gen_config.temperature
+    do_sample = gen_config.do_sample and temperature > 0 and float(top_p) > 0
+    if not do_sample:
+        return logits.argmax(dim=-1).view(-1)
+
     # Apply temperature
-    if any(t != 1.0 for t in temperatures):
-        temp_tensor = torch.tensor(temperatures, dtype=logits.dtype, device=logits.device)
-        logits = logits / temp_tensor.unsqueeze(1)
-    # Apply top-k filtering
-    if any(k > 0 for k in top_ks):
-        for i, k in enumerate(top_ks):
-            if k > 0:
-                values, _ = torch.topk(logits[i], k)
-                min_value = values[-1]
-                logits[i][logits[i] < min_value] = float("-inf")
-    # Apply top-p filtering
-    if any(p < 1.0 for p in top_ps):
-        for i, p in enumerate(top_ps):
-            if p < 1.0:
-                sorted_logits, sorted_indices = torch.sort(logits[i], descending=True)
-                probs = torch.softmax(sorted_logits, dim=-1)
-                cumsum_probs = torch.cumsum(probs, dim=-1)
-                # Remove tokens with cumulative probability above threshold
-                sorted_indices_to_remove = cumsum_probs > p
-                sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
-                sorted_indices_to_remove[0] = False
-                indices_to_remove = sorted_indices[sorted_indices_to_remove]
-                logits[i][indices_to_remove] = float("-inf")
+    if temperature != 1.0:
+        logits = logits / temperature
+
+    if top_k is not None:
+        top_k = torch.full((logits.shape[0],), int(top_k), device=logits.device)
+    if top_p is not None:
+        top_p = torch.full((logits.shape[0],), float(top_p), device=logits.device)
+    logits = sampler.apply_top_k_top_p(logits, top_k, top_p)
+
     # Convert to probabilities and sample
     probs = torch.softmax(logits, dim=-1)
-    # Use greedy sampling if all temperatures are 0 or top_k is 1
-    if all(t == 0.0 or k == 1 for t, k in zip(temperatures, top_ks)):
-        sampled_tokens = torch.argmax(probs, dim=-1)
-    else:
-        # Gumbel-max sampling
-        noise = torch.empty_like(probs).exponential_(1)
-        sampled_tokens = torch.argmax(probs / noise, dim=-1)
-    return sampled_tokens
+    # Gumbel-max sampling
+    noise = torch.empty_like(probs).exponential_(1)
+    return torch.argmax(probs / noise, dim=-1)
 
 
 @pytest.mark.parametrize("batch_size", [1, 2048, 4096])
