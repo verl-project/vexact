@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
+import os
 import queue
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -84,6 +86,46 @@ class Scheduler:
 
         self._result_queue: queue.Queue[InferenceRequest] = queue.Queue()
         self._enable_chunked_prefill = config.enable_chunked_prefill
+
+        # Optional per-step batch probe. When VEXACT_BATCH_PROBE is set to a file
+        # path, each scheduled step's batch composition is appended as JSONL so we
+        # can compare vexact's actual per-step token counts against vllm's.
+        self._probe_path = os.environ.get("VEXACT_BATCH_PROBE")
+        self._probe_label = os.environ.get("VEXACT_BATCH_PROBE_LABEL", "vexact")
+        self._probe_step = 0
+        self._probe_fh = None
+        if self._probe_path:
+            # line-buffered append; one scheduler == one worker process
+            self._probe_fh = open(self._probe_path, "a", buffering=1)
+
+    def _probe_record(self, batch_to_infer: list[InferenceRequest]) -> None:
+        """Append this step's batch composition to the probe file (if enabled)."""
+        if self._probe_fh is None or not batch_to_infer:
+            return
+        prefill_seqs = prefill_tokens = decode_seqs = decode_tokens = 0
+        for req in batch_to_infer:
+            toks = req.tokens_this_step or 0
+            # decode step: whole prompt already computed (num_computed_tokens
+            # advanced past input length); otherwise this is a (chunked) prefill.
+            if req.num_computed_tokens > len(req.input_ids_list):
+                decode_seqs += 1
+                decode_tokens += toks
+            else:
+                prefill_seqs += 1
+                prefill_tokens += toks
+        rec = {
+            "label": self._probe_label,
+            "step": self._probe_step,
+            "num_seqs": len(batch_to_infer),
+            "total_tokens": prefill_tokens + decode_tokens,
+            "prefill_seqs": prefill_seqs,
+            "prefill_tokens": prefill_tokens,
+            "decode_seqs": decode_seqs,
+            "decode_tokens": decode_tokens,
+            "queue_size": self.queue_size(),
+        }
+        self._probe_fh.write(json.dumps(rec) + "\n")
+        self._probe_step += 1
 
     @property
     def _active_requests(self) -> OrderedDict[str, InferenceRequest]:
@@ -181,6 +223,9 @@ class Scheduler:
 
         # Get snapshot of batch to send for inference
         batch_to_infer = self._inflight_batches[self._current_batch_idx].get_snapshot()
+
+        # Record per-step batch composition for offline analysis (no-op unless enabled)
+        self._probe_record(batch_to_infer)
 
         # Advance circular buffer: rotate to next batch slot
         self._current_batch_idx = (self._current_batch_idx + 1) % len(self._inflight_batches)

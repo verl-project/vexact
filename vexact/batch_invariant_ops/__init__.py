@@ -25,7 +25,11 @@ from .batch_invariant_ops import (
     set_batch_invariant_mode,
     triton_bmm,
 )
-from .flash_attention import flash_attention_forward, flash_attention_forward_cute
+from .flash_attention import (
+    flash_attention_forward,
+    flash_attention_forward_cute,
+    flash_attention_forward_variant,
+)
 from .flex_attention import flex_attention_forward
 
 
@@ -43,6 +47,7 @@ __all__ = [
     "AttentionBlockSize",
     "flash_attention_forward",
     "flash_attention_forward_cute",
+    "flash_attention_forward_variant",
     "flex_attention_forward",
     "triton_bmm",
     "batch_invariant_rms_norm",
