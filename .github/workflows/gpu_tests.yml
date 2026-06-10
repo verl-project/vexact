@@ -57,7 +57,6 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 120
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
     steps:
       - uses: actions/checkout@v4
@@ -65,12 +64,7 @@ jobs:
           fetch-depth: 0
 
       - name: Check runner
-        run: |
-          if [ -z "${HTTPS_PROXY:-}" ]; then
-            echo "PROXY_HTTPS is not available to this repository."
-            exit 1
-          fi
-          nvidia-smi
+        run: nvidia-smi
 
       - name: Install dependencies
         run: |
