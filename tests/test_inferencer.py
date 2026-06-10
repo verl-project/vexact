@@ -32,11 +32,6 @@ from vexact.inferencer.inferencer import Inferencer
 from vexact.inferencer.model_loader import ModelCreator, load_weights_from_weight_path
 
 
-# Non-default attention backends compare PP hidden-state goldens within one bf16 step.
-_BACKEND_HIDDEN_RTOL = 4e-3
-_BACKEND_HIDDEN_ATOL = 4e-3
-
-
 @pytest.fixture(scope="module")
 def total_hidden_layers() -> int:
     return 3
@@ -164,20 +159,25 @@ def _assert_tensor_on_device(tensor: torch.Tensor, device: torch.device) -> None
         assert tensor.device.index == expected_device.index
 
 
-def _assert_backend_hidden_tensor(actual: torch.Tensor, expected: torch.Tensor) -> None:
-    if get_tests_attn_impl() == "fa-invariant":
-        assert torch.equal(actual.cpu(), expected.cpu())
-        return
-
-    torch.testing.assert_close(
-        actual.cpu(),
-        expected.cpu(),
-        rtol=_BACKEND_HIDDEN_RTOL,
-        atol=_BACKEND_HIDDEN_ATOL,
+def _forward_full_model(
+    model: torch.nn.Module,
+    vexact_config: VeXactConfig,
+    inference_request: InferenceRequest,
+    device: torch.device,
+) -> tuple[Inferencer, GenerationContext, torch.nn.Module]:
+    inferencer = Inferencer(
+        model=model,
+        config=vexact_config,
+        pp_info=PPInfo(1, 0),
+        pp_messager=None,
+        device=device,
+        enable_batch_invariant=True,
     )
+    gen_ctx = inferencer._prepare_gen_ctx([inference_request])
+    return inferencer, gen_ctx, inferencer._forward(gen_ctx)
 
 
-def test_pp_first_rank(repo_root, model_config, model_path, cache_config, inference_request, device):
+def test_pp_first_rank(repo_root, model_config, model_path, cache_config, inference_request, model, device):
     pp_info = PPInfo(3, 0)
     model_creator = ModelCreator(model_config, model_path, device, pp_info)
     causal_model = model_creator.create_model()
@@ -199,13 +199,17 @@ def test_pp_first_rank(repo_root, model_config, model_path, cache_config, infere
     gen_ctx = inferencer._prepare_gen_ctx([inference_request])
     intermediate_outputs = inferencer._forward(gen_ctx)
 
-    expected_intermediate = torch.load(repo_root / "tests/ref_data/first_rank_intermediate.pt")
+    if get_tests_attn_impl() == "fa-invariant":
+        expected_intermediate = torch.load(repo_root / "tests/ref_data/first_rank_intermediate.pt")
+    else:
+        _, full_ctx, full_outputs = _forward_full_model(model, vexact_config, inference_request, device)
+        expected_intermediate = _real_token_hidden_states(full_outputs.hidden_states[1], full_ctx)
     actual_intermediate = _real_token_hidden_states(intermediate_outputs.hidden_states, gen_ctx)
     _assert_tensor_on_device(actual_intermediate, device)
-    _assert_backend_hidden_tensor(actual_intermediate, expected_intermediate)
+    assert torch.equal(actual_intermediate.cpu(), expected_intermediate.cpu())
 
 
-def test_pp_mid_rank(repo_root, model_config, model_path, cache_config, inference_request, device):
+def test_pp_mid_rank(repo_root, model_config, model_path, cache_config, inference_request, model, device):
     pp_info = PPInfo(3, 1)
     model_creator = ModelCreator(model_config, model_path, device, pp_info)
     causal_model = model_creator.create_model()
@@ -224,19 +228,30 @@ def test_pp_mid_rank(repo_root, model_config, model_path, cache_config, inferenc
         enable_batch_invariant=True,
     )
 
+    full_ctx = None
+    full_outputs = None
     gen_ctx = inferencer._prepare_gen_ctx([inference_request])
     gen_ctx.batch_input_ids = None
-    gen_ctx.intermediate_tensors = torch.load(repo_root / "tests/ref_data/first_rank_intermediate.pt")
+    if get_tests_attn_impl() == "fa-invariant":
+        gen_ctx.intermediate_tensors = torch.load(repo_root / "tests/ref_data/first_rank_intermediate.pt")
+    else:
+        _, full_ctx, full_outputs = _forward_full_model(model, vexact_config, inference_request, device)
+        gen_ctx.intermediate_tensors = _real_token_hidden_states(full_outputs.hidden_states[1], full_ctx)
     intermediate_outputs = inferencer._forward(gen_ctx)
 
-    expected_intermediate = torch.load(repo_root / "tests/ref_data/mid_rank_intermediate.pt")
+    if get_tests_attn_impl() == "fa-invariant":
+        expected_intermediate = torch.load(repo_root / "tests/ref_data/mid_rank_intermediate.pt")
+    else:
+        assert full_ctx is not None
+        assert full_outputs is not None
+        expected_intermediate = _real_token_hidden_states(full_outputs.hidden_states[2], full_ctx)
     actual_intermediate = _real_token_hidden_states(intermediate_outputs.hidden_states, gen_ctx)
     _assert_tensor_on_device(actual_intermediate, device)
-    _assert_backend_hidden_tensor(actual_intermediate, expected_intermediate)
+    assert torch.equal(actual_intermediate.cpu(), expected_intermediate.cpu())
 
 
 def test_pp_last_rank(
-    repo_root, model_config, model_path, cache_config, inference_request, baseline_inferenceroutput, device
+    repo_root, model_config, model_path, cache_config, inference_request, baseline_inferenceroutput, model, device
 ):
     pp_info = PPInfo(3, 2)
     model_creator = ModelCreator(model_config, model_path, device, pp_info)
@@ -258,16 +273,28 @@ def test_pp_last_rank(
 
     gen_ctx = inferencer._prepare_gen_ctx([inference_request])
     gen_ctx.batch_input_ids = None
-    gen_ctx.intermediate_tensors = torch.load(repo_root / "tests/ref_data/mid_rank_intermediate.pt")
+    expected_token_ids = baseline_inferenceroutput.token_ids
+    expected_logits = baseline_inferenceroutput.logits
+    if get_tests_attn_impl() == "fa-invariant":
+        gen_ctx.intermediate_tensors = torch.load(repo_root / "tests/ref_data/mid_rank_intermediate.pt")
+    else:
+        full_inferencer, full_ctx, full_outputs = _forward_full_model(model, vexact_config, inference_request, device)
+        gen_ctx.intermediate_tensors = _real_token_hidden_states(full_outputs.hidden_states[2], full_ctx)
+        expected_token_ids, expected_logits, _ = full_inferencer._select_tokens(
+            [inference_request.generation_config],
+            [len(inference_request.generated_tokens)],
+            full_outputs,
+            full_ctx,
+        )
 
     outputs = inferencer._forward(gen_ctx)
 
     token_ids, logits, logprobs = inferencer._select_tokens(
         [inference_request.generation_config], [len(inference_request.generated_tokens)], outputs, gen_ctx
     )
-    assert torch.equal(token_ids.cpu(), baseline_inferenceroutput.token_ids)
+    assert torch.equal(token_ids.cpu(), expected_token_ids.cpu())
     for i in range(len(logits)):
-        assert torch.equal(logits[i].cpu(), baseline_inferenceroutput.logits[i])
+        assert torch.equal(logits[i].cpu(), expected_logits[i].cpu())
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for cudagraph replay")
