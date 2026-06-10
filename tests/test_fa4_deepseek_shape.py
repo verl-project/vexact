@@ -31,7 +31,13 @@ try:
 except ImportError:
     FA4_AVAILABLE = False
 
-pytestmark = pytest.mark.skipif(not FA4_AVAILABLE, reason="flash_attn.cute (FA4) not available")
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for FA4 tests")
+
+_CUDA_MAJOR = torch.cuda.get_device_capability()[0] if torch.cuda.is_available() else 0
+requires_fa4_paged_kv = pytest.mark.skipif(
+    not FA4_AVAILABLE or _CUDA_MAJOR < 9,
+    reason="flash_attn.cute paged KV requires SM90+",
+)
 
 
 def reference_attention(q, k, v, scale):
@@ -47,6 +53,7 @@ def reference_attention(q, k, v, scale):
     return out.to(q.dtype)
 
 
+@requires_fa4_paged_kv
 def test_fa4_qwen_paged():
     """Test FA4 with DeepSeek (192, 128) shape using paged KV cache."""
     from flash_attn.cute import flash_attn_varlen_func
@@ -171,6 +178,7 @@ def test_fa4_qwen_paged():
     print("PASSED: FA4 (192, 128) paged attention with padded view workaround works correctly")
 
 
+@requires_fa4_paged_kv
 def test_fa4_deepseek_paged():
     """Test FA4 with DeepSeek (192, 128) shape using paged KV cache."""
     from flash_attn.cute import flash_attn_varlen_func
