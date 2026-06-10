@@ -95,3 +95,8 @@ show_disk_usage "after Moonlight-16B-A3B-Instruct download"
 
 echo "Running Moonlight-16B-A3B-Instruct VExact/VeOmni bitwise verifier"
 run_verifier_pair "${MOONLIGHT_MODEL_PATH}" "${RUNNER_TEMP:-/tmp}/moonlight-vexact-triton-outputs" 64 4 2 32 true true
+
+if [[ "${VEXACT_RUN_VERL_SMOKE:-1}" == "1" ]]; then
+  echo "Running Moonlight-16B-A3B-Instruct VeRL smoke test"
+  bash .github/scripts/run_verl_smoke.sh "${MOONLIGHT_MODEL_PATH}"
+fi
