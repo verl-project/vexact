@@ -30,6 +30,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -46,6 +47,7 @@ from vexact.batch_invariant_ops import flash_attention_forward as flash_attentio
 from vexact.batch_invariant_ops import flash_attention_forward_cute as flash_attention_forward_cute_impl
 from vexact.batch_invariant_ops import flex_attention_forward
 from vexact.batch_invariant_ops import triton_flash_attention_forward as triton_flash_attention_forward_impl
+from vexact.batch_invariant_ops.standalone_logprobs import logprobs_from_logits_flash_attn
 from vexact.config import PPInfo
 from vexact.inferencer.model_loader import ModelCreator
 from vexact.models.register import register_models as _register_models
@@ -550,6 +552,7 @@ def run_batch_inference(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: int | None = None,
     use_fused_lce: bool = False,
+    run_backward: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """
     Run batch inference to get logits, then run backward pass to check gradients.
@@ -566,7 +569,7 @@ def run_batch_inference(
     """
     logger.info(f"Running batch inference (batch_invariant={'enabled' if enable_batch_invariant else 'disabled'})...")
 
-    model.train()
+    model.train(run_backward)
     if enable_batch_invariant:
         from vexact.batch_invariant_ops import set_batch_invariant_mode
 
@@ -580,30 +583,32 @@ def run_batch_inference(
         labels = input_ids if use_fused_lce else None
         lce_kwargs = {"labels": labels, "return_log_probs": True} if use_fused_lce else {}
         with set_batch_invariant_mode(True):
-            if cu_seqlens is None or max_seqlen is None:
-                outputs = model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    use_cache=False,
-                    return_dict=True,
-                    num_splits=1,
-                    **lce_kwargs,
-                )
-            else:
-                outputs = model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    cu_seq_lens_q=cu_seqlens,
-                    cu_seq_lens_k=cu_seqlens,
-                    max_length_q=max_seqlen,
-                    max_length_k=max_seqlen,
-                    use_cache=False,
-                    return_dict=True,
-                    num_splits=1,
-                    **lce_kwargs,
-                )
+            grad_context = contextlib.nullcontext() if run_backward else torch.no_grad()
+            with grad_context:
+                if cu_seqlens is None or max_seqlen is None:
+                    outputs = model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        use_cache=False,
+                        return_dict=True,
+                        num_splits=1,
+                        **lce_kwargs,
+                    )
+                else:
+                    outputs = model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        cu_seq_lens_q=cu_seqlens,
+                        cu_seq_lens_k=cu_seqlens,
+                        max_length_q=max_seqlen,
+                        max_length_k=max_seqlen,
+                        use_cache=False,
+                        return_dict=True,
+                        num_splits=1,
+                        **lce_kwargs,
+                    )
     else:
         raise NotImplementedError
 
@@ -622,7 +627,7 @@ def run_batch_inference(
     logger.info(f"Generated logprobs shape: {log_probs.shape if log_probs is not None else None}")
 
     # Run backward pass and check grad_norm
-    if log_probs is not None:
+    if run_backward and log_probs is not None:
         # Simple loss: negative mean of log_probs
         # Mask out padding positions using attention_mask
         masked_log_probs = log_probs * attention_mask
@@ -642,8 +647,10 @@ def run_batch_inference(
 
         assert torch.count_nonzero(grad_norm) != 0, "grad_norm should not be zero. Please debug fused lce computation."
 
-    else:
+    elif log_probs is None:
         logger.warning("Cannot run backward: log_probs is None")
+    else:
+        logger.info("Skipping backward pass")
 
     return logits, log_probs
 
@@ -795,6 +802,37 @@ def extract_generated_logprobs_remove_padding(
         logger.debug(
             f"Extracted {len(logprobs_list)} logprob values for request {req_id} (seq range: {seq_start}-{seq_end})"
         )
+
+    return extracted_logprobs
+
+
+def compute_logprobs_from_extracted_logits(
+    extracted_logits: dict[str, list[torch.Tensor]],
+    all_token_ids: dict[str, list[int]],
+    metadata: dict,
+    request_ids: list[str],
+    logger,
+) -> dict[str, list[torch.Tensor]]:
+    logger.info("Computing generated token logprobs from extracted logits...")
+
+    extracted_logprobs = {}
+    for req_id in request_ids:
+        logits_list = extracted_logits[req_id]
+        prompt_len = metadata[req_id]["prompt_len"]
+        response_len = metadata[req_id]["response_len"]
+        if len(logits_list) != response_len:
+            raise ValueError(
+                f"Request {req_id} has {len(logits_list)} extracted logits but {response_len} generated tokens."
+            )
+
+        logits = torch.cat([logit.reshape(-1, logit.shape[-1]) for logit in logits_list], dim=0).to(torch.float32)
+        labels = torch.tensor(
+            all_token_ids[req_id][prompt_len : prompt_len + response_len],
+            device=logits.device,
+            dtype=torch.long,
+        )
+        logprobs = logprobs_from_logits_flash_attn(logits, labels, inplace_backward=False)
+        extracted_logprobs[req_id] = [logprobs[token_idx : token_idx + 1] for token_idx in range(response_len)]
 
     return extracted_logprobs
 
@@ -1190,6 +1228,16 @@ def parse_arguments():
         action="store_true",
         help="Enable VeOmni fused per-token logprob path",
     )
+    parser.add_argument(
+        "--logprobs_from_logits",
+        action="store_true",
+        help="Compute fresh logprobs from fresh logits using the same standalone CE path as rollout.",
+    )
+    parser.add_argument(
+        "--skip_backward",
+        action="store_true",
+        help="Skip the verifier backward pass.",
+    )
 
     return parser.parse_args()
 
@@ -1256,6 +1304,7 @@ def main():
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
                 use_fused_lce=args.use_fused_lce,
+                run_backward=not args.skip_backward,
             )
             # when using triton fused kernels, logits would not be materialized
             if batch_logits is not None:
@@ -1269,6 +1318,10 @@ def main():
             if batch_logprobs is not None:
                 fresh_logprobs = extract_generated_logprobs_remove_padding(
                     batch_logprobs, request_ids, metadata, prompt_lens, cu_seqlens_list, logger
+                )
+            elif args.logprobs_from_logits and fresh_logits is not None:
+                fresh_logprobs = compute_logprobs_from_extracted_logits(
+                    fresh_logits, all_token_ids, metadata, request_ids, logger
                 )
             else:
                 fresh_logprobs = None
@@ -1303,6 +1356,10 @@ def main():
             # Extract logprobs if available
             if batch_logprobs is not None:
                 fresh_logprobs = extract_generated_logprobs(batch_logprobs, request_ids, metadata, prompt_lens, logger)
+            elif args.logprobs_from_logits and fresh_logits is not None:
+                fresh_logprobs = compute_logprobs_from_extracted_logits(
+                    fresh_logits, all_token_ids, metadata, request_ids, logger
+                )
             else:
                 fresh_logprobs = None
 
@@ -1322,7 +1379,7 @@ def main():
 
         # Compare logprobs if available
         logprobs_results = None
-        if batch_logprobs is not None and fresh_logprobs is not None:
+        if fresh_logprobs is not None:
             logprobs_results = compare_logprobs(
                 saved_logprobs,
                 fresh_logprobs,

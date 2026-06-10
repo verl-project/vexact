@@ -29,6 +29,8 @@ run_verifier_pair() {
   local max_new_tokens="$4"
   local simulate_requests="$5"
   local max_cache_blocks="${6:-}"
+  local skip_backward="${7:-false}"
+  local logprobs_from_logits="${8:-false}"
 
   rm -rf "${output_dir}"
   local inference_cmd=(
@@ -42,6 +44,7 @@ run_verifier_pair() {
     --max_num_batched_tokens 512
     --enable_batch_invariant
     --enable_chunked_prefill
+    --use_fp32_logits
     --output_dir "${output_dir}"
     --seed 1234
   )
@@ -50,16 +53,26 @@ run_verifier_pair() {
   fi
   "${inference_cmd[@]}"
 
-  uv run --frozen python tests/scripts/verify_logits_vs_native_hf.py \
-    --model_path "${model_path}" \
-    --data_dir "${output_dir}" \
-    --attn_impl "${VEXACT_TESTS_ATTN_IMPL}" \
-    --model_backend veomni \
-    --enable_batch_invariant \
-    --use_remove_padding \
-    --use_fused_lce \
-    --rtol 0 \
+  local verify_cmd=(
+    uv run --frozen python tests/scripts/verify_logits_vs_native_hf.py
+    --model_path "${model_path}"
+    --data_dir "${output_dir}"
+    --attn_impl "${VEXACT_TESTS_ATTN_IMPL}"
+    --model_backend veomni
+    --enable_batch_invariant
+    --use_remove_padding
+    --rtol 0
     --atol 0
+  )
+  if [[ "${logprobs_from_logits}" == "true" ]]; then
+    verify_cmd+=(--logprobs_from_logits)
+  else
+    verify_cmd+=(--use_fused_lce)
+  fi
+  if [[ "${skip_backward}" == "true" ]]; then
+    verify_cmd+=(--skip_backward)
+  fi
+  "${verify_cmd[@]}"
 }
 
 show_disk_usage "before model downloads"
@@ -81,4 +94,4 @@ download_model "moonshotai/Moonlight-16B-A3B-Instruct" "${MOONLIGHT_MODEL_PATH}"
 show_disk_usage "after Moonlight-16B-A3B-Instruct download"
 
 echo "Running Moonlight-16B-A3B-Instruct VExact/VeOmni bitwise verifier"
-run_verifier_pair "${MOONLIGHT_MODEL_PATH}" "${RUNNER_TEMP:-/tmp}/moonlight-vexact-triton-outputs" 64 4 2 32
+run_verifier_pair "${MOONLIGHT_MODEL_PATH}" "${RUNNER_TEMP:-/tmp}/moonlight-vexact-triton-outputs" 64 4 2 32 true true
