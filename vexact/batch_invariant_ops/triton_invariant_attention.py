@@ -645,9 +645,11 @@ class _PagedFlashAttentionVarlen(torch.autograd.Function):
         block_d = triton.next_power_of_2(max(q.shape[-1], v.shape[-1]))
         if block_d > 256:
             raise ValueError(f"head_dim must be <= 256, got {q.shape[-1]}")
+        block_m = 128 if block_d <= 128 else 32
+        block_n = 64 if block_m >= 64 else 32
 
         max_seqlen_k = page_table.shape[1] * k.shape[1]
-        grid = (seqused_k.numel(), triton.cdiv(max_seqlen_k, 128), q.shape[1])
+        grid = (seqused_k.numel(), triton.cdiv(max_seqlen_k, block_m), q.shape[1])
         _paged_attn_fwd_block_kernel[grid](
             q,
             k,
@@ -681,8 +683,8 @@ class _PagedFlashAttentionVarlen(torch.autograd.Function):
             causal,
             BF16_OUTPUT=q.dtype == torch.bfloat16,
             FP32_OUTPUT=q.dtype == torch.float32,
-            BLOCK_M=128,
-            BLOCK_N=64,
+            BLOCK_M=block_m,
+            BLOCK_N=block_n,
             BLOCK_D=block_d,
             num_warps=4,
             num_stages=3,
@@ -733,8 +735,10 @@ class _NonpagedFlashAttentionVarlen(torch.autograd.Function):
         block_d = triton.next_power_of_2(max(q.shape[-1], v.shape[-1]))
         if block_d > 256:
             raise ValueError(f"head_dim must be <= 256, got {q.shape[-1]}")
+        block_m = 128 if block_d <= 128 else 32
+        block_n = 64 if block_m >= 64 else 32
 
-        grid = (cu_seqlens_q.numel() - 1, triton.cdiv(max(max_seqlen_q, max_seqlen_k), 128), q.shape[1])
+        grid = (cu_seqlens_q.numel() - 1, triton.cdiv(max(max_seqlen_q, max_seqlen_k), block_m), q.shape[1])
         _varlen_attn_fwd_block_kernel[grid](
             q,
             k,
@@ -765,8 +769,8 @@ class _NonpagedFlashAttentionVarlen(torch.autograd.Function):
             causal,
             BF16_OUTPUT=q.dtype == torch.bfloat16,
             FP32_OUTPUT=q.dtype == torch.float32,
-            BLOCK_M=128,
-            BLOCK_N=64,
+            BLOCK_M=block_m,
+            BLOCK_N=block_n,
             BLOCK_D=block_d,
             num_warps=4,
             num_stages=3,
