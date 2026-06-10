@@ -51,6 +51,7 @@ def test_generate_throughput(vexact_engine):
                         max_new_tokens=15,
                         do_sample=True,
                         temperature=1,
+                        top_p=1.0,
                     )
                     request = DriverRequest(
                         generation_config=gen_config,
