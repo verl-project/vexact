@@ -19,7 +19,11 @@ from pathlib import Path
 
 import pytest
 
+from vexact.core.request import RequestStatus
 from vexact.utils.subprocess_utils import get_sys_executable
+
+
+_COMPLETED_METADATA_STATUS = {"completed", RequestStatus.FINISHED.value}
 
 
 def _load_metadata(metadata_path: Path) -> dict:
@@ -106,7 +110,7 @@ def _run_simulation_and_compare(tmp_path: Path, pipeline_parallel_size: int):
     if attn_impl != "fa-invariant":
         new_metadata = _load_metadata(new_metadata_path)
         for request_id, entry in new_metadata.items():
-            assert entry.get("status") == "completed", f"{request_id} did not complete: {entry}"
+            assert entry.get("status") in _COMPLETED_METADATA_STATUS, f"{request_id} did not complete: {entry}"
             assert entry.get("response_len", 0) > 0, f"{request_id} produced no response tokens"
         return
 
