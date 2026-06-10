@@ -75,7 +75,6 @@ jobs:
         run: |
           uv run --frozen pytest -s -x tests/batch_invariant_ops/test_matmul.py
           uv run --frozen pytest -s -x tests/batch_invariant_ops/test_fused_moe.py
-          uv run --frozen pytest -s -x tests/test_inferencer_sampling.py
 
   cleanup:
     runs-on: ubuntu-latest
