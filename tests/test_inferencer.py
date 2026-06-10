@@ -18,6 +18,7 @@ import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig, PretrainedConfig
 
+from tests.conftest import get_tests_attn_impl
 from vexact.batch_invariant_ops import (
     disable_batch_invariant_mode,
     enable_batch_invariant_mode,
@@ -52,7 +53,7 @@ def model_config(model_path, device, total_hidden_layers) -> PretrainedConfig:
         "torch_dtype": torch.bfloat16,
         "device_map": {"": device},  # Place entire model on target device
         "trust_remote_code": True,
-        "_attn_implementation": "fa-invariant",
+        "_attn_implementation": get_tests_attn_impl(),
     }
     config = AutoConfig.from_pretrained(model_path, **model_kwargs)
     config.num_hidden_layers = total_hidden_layers
@@ -125,7 +126,7 @@ def test_inferencer_generates_expected_token(
     cache_config, config, model, inference_request, baseline_inferenceroutput, device, model_path
 ):
     vexact_config = VeXactConfig(
-        model=ModelConfig(model_path=model_path, hf_config=config),
+        model=ModelConfig(model_path=model_path, attn_impl=get_tests_attn_impl(), hf_config=config),
         cache=cache_config,
         scheduler=SchedulerConfig(),
     )
@@ -163,7 +164,7 @@ def test_pp_first_rank(repo_root, model_config, model_path, cache_config, infere
     causal_model = model_creator.create_model()
 
     vexact_config = VeXactConfig(
-        model=ModelConfig(model_path=model_path, hf_config=model_config),
+        model=ModelConfig(model_path=model_path, attn_impl=get_tests_attn_impl(), hf_config=model_config),
         cache=cache_config,
         scheduler=SchedulerConfig(),
     )
@@ -191,7 +192,7 @@ def test_pp_mid_rank(repo_root, model_config, model_path, cache_config, inferenc
     causal_model = model_creator.create_model()
 
     vexact_config = VeXactConfig(
-        model=ModelConfig(model_path=model_path, hf_config=model_config),
+        model=ModelConfig(model_path=model_path, attn_impl=get_tests_attn_impl(), hf_config=model_config),
         cache=cache_config,
         scheduler=SchedulerConfig(),
     )
@@ -223,7 +224,7 @@ def test_pp_last_rank(
     causal_model = model_creator.create_model()
 
     vexact_config = VeXactConfig(
-        model=ModelConfig(model_path=model_path, hf_config=model_config),
+        model=ModelConfig(model_path=model_path, attn_impl=get_tests_attn_impl(), hf_config=model_config),
         cache=cache_config,
         scheduler=SchedulerConfig(),
     )
@@ -274,7 +275,12 @@ def test_inferencer_cudagraph_decode_matches_eager(model, device, model_path, ca
         return req
 
     vexact_config = VeXactConfig(
-        model=ModelConfig(model_path=model_path, hf_config=model.config, enforce_eager=False),
+        model=ModelConfig(
+            model_path=model_path,
+            attn_impl=get_tests_attn_impl(),
+            hf_config=model.config,
+            enforce_eager=False,
+        ),
         cache=cache_config,
         scheduler=SchedulerConfig(max_num_batched_tokens=2),
     )
@@ -315,7 +321,12 @@ def test_inferencer_cudagraph_decode_matches_eager(model, device, model_path, ca
     inferencer_eager = Inferencer(
         model=model,
         config=VeXactConfig(
-            model=ModelConfig(model_path=model_path, hf_config=model.config, enforce_eager=True),
+            model=ModelConfig(
+                model_path=model_path,
+                attn_impl=get_tests_attn_impl(),
+                hf_config=model.config,
+                enforce_eager=True,
+            ),
             cache=cache_config,
             scheduler=SchedulerConfig(),
         ),
@@ -391,7 +402,12 @@ def _run_inferencer(
     inferencer = Inferencer(
         model=model,
         config=VeXactConfig(
-            model=ModelConfig(model_path=model_path, hf_config=model.config, enforce_eager=enforce_eager),
+            model=ModelConfig(
+                model_path=model_path,
+                attn_impl=get_tests_attn_impl(),
+                hf_config=model.config,
+                enforce_eager=enforce_eager,
+            ),
             cache=cache_config,
             scheduler=SchedulerConfig(max_num_seqs=max_num_seqs, max_num_batched_tokens=max_num_batched_tokens),
         ),

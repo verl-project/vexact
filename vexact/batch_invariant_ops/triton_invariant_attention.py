@@ -731,8 +731,8 @@ class _NonpagedFlashAttentionVarlen(torch.autograd.Function):
         out = torch.zeros((q.shape[0], q.shape[1], v.shape[-1]), device=q.device, dtype=q.dtype)
         lse = torch.empty((q.shape[0], q.shape[1]), device=q.device, dtype=torch.float32)
         block_d = triton.next_power_of_2(max(q.shape[-1], v.shape[-1]))
-        if block_d > 128:
-            raise ValueError(f"head_dim must be <= 128, got {q.shape[-1]}")
+        if block_d > 256:
+            raise ValueError(f"head_dim must be <= 256, got {q.shape[-1]}")
 
         grid = (cu_seqlens_q.numel() - 1, triton.cdiv(max(max_seqlen_q, max_seqlen_k), 128), q.shape[1])
         _varlen_attn_fwd_block_kernel[grid](
@@ -791,8 +791,8 @@ class _NonpagedFlashAttentionVarlen(torch.autograd.Function):
         dk = torch.empty_like(k)
         dv = torch.empty_like(v)
         block_d = triton.next_power_of_2(max(q.shape[-1], v.shape[-1]))
-        if block_d > 128:
-            raise ValueError(f"head_dim must be <= 128, got {q.shape[-1]}")
+        if block_d > 256:
+            raise ValueError(f"head_dim must be <= 256, got {q.shape[-1]}")
         block_m = 64 if block_d <= 64 else 32
         block_n = 64 if block_d <= 64 else 32
         groups = q.shape[1] // k.shape[1]

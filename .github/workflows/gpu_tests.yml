@@ -7,6 +7,7 @@ on:
     paths:
       - "vexact/**"
       - "tests/**"
+      - ".github/scripts/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/gpu_tests.yml"
@@ -16,6 +17,7 @@ on:
     paths:
       - "vexact/**"
       - "tests/**"
+      - ".github/scripts/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/gpu_tests.yml"
@@ -55,9 +57,10 @@ jobs:
     if: github.repository_owner == 'verl-project'
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
-    timeout-minutes: 120
+    timeout-minutes: 360
     env:
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      VEXACT_TESTS_ATTN_IMPL: "triton-invariant"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -69,14 +72,10 @@ jobs:
       - name: Install dependencies
         run: |
           pip3 install uv==0.9.8
-          uv sync --frozen --extra gpu --extra dev --extra veomni --extra vllm
+          uv sync --frozen --extra gpu --extra dev --extra veomni --extra vllm --extra verl
 
-      - name: Run GPU smoke tests
-        run: |
-          uv run --frozen pytest -s -x tests/batch_invariant_ops/test_matmul.py
-          uv run --frozen pytest -s -x tests/batch_invariant_ops/test_fused_moe.py
-          uv run --frozen pytest -s -x tests/batch_invariant_ops/test_triton_attention_varlen.py
-          uv run --frozen pytest -s -x tests/test_inferencer_sampling.py
+      - name: Run GPU unit and smoke tests
+        run: .github/scripts/run_gpu_tests.sh
 
   cleanup:
     runs-on: ubuntu-latest

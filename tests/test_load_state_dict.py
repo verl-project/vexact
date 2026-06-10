@@ -26,6 +26,7 @@ import uuid
 import torch
 from transformers import GenerationConfig
 
+from tests.conftest import get_tests_attn_impl
 from vexact.config import ModelConfig, ParallelConfig, SchedulerConfig, VeXactConfig
 from vexact.core.request import InferenceRequest
 from vexact.utils.tokenizer import load_tokenizer
@@ -39,7 +40,7 @@ def test_load_state_dict():
     config = VeXactConfig(
         model=ModelConfig(
             model_path=model_path,
-            attn_impl="fa-invariant",
+            attn_impl=get_tests_attn_impl(),
             enable_batch_invariant=True,
         ),
         parallel=ParallelConfig(pipeline_parallel_size=1),

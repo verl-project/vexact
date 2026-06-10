@@ -332,6 +332,61 @@ def test_triton_flash_attn_varlen_qwen3_like_nonpaged_backward():
     assert v.grad is not None and torch.isfinite(v.grad).all()
 
 
+def test_triton_flash_attn_varlen_mla_nonpaged_backward_matches_eager():
+    torch.manual_seed(404)
+    q_lens = [3, 17]
+    kv_lens = [33, 65]
+    q_heads = 16
+    kv_heads = 16
+    qk_head_dim = 192
+    v_head_dim = 128
+    dtype = torch.float32
+    q = torch.randn(sum(q_lens), q_heads, qk_head_dim, device="cuda", dtype=dtype, requires_grad=True)
+    k = torch.randn(sum(kv_lens), kv_heads, qk_head_dim, device="cuda", dtype=dtype, requires_grad=True)
+    v = torch.randn(sum(kv_lens), kv_heads, v_head_dim, device="cuda", dtype=dtype, requires_grad=True)
+    q_ref = q.detach().clone().requires_grad_(True)
+    k_ref = k.detach().clone().requires_grad_(True)
+    v_ref = v.detach().clone().requires_grad_(True)
+    cu_q = torch.tensor([0, q_lens[0], sum(q_lens)], device="cuda", dtype=torch.int32)
+    cu_k = torch.tensor([0, kv_lens[0], sum(kv_lens)], device="cuda", dtype=torch.int32)
+
+    out, _ = flash_attn_varlen_func(
+        q,
+        k,
+        v,
+        cu_q,
+        cu_k,
+        max_seqlen_q=max(q_lens),
+        max_seqlen_k=max(kv_lens),
+        softmax_scale=qk_head_dim**-0.5,
+        causal=True,
+    )
+
+    ref_chunks = []
+    q_offset = 0
+    kv_offset = 0
+    for q_len, kv_len in zip(q_lens, kv_lens):
+        ref_chunks.append(
+            _eager_attention(
+                q_ref[q_offset : q_offset + q_len],
+                k_ref[kv_offset : kv_offset + kv_len],
+                v_ref[kv_offset : kv_offset + kv_len],
+                qk_head_dim**-0.5,
+            )
+        )
+        q_offset += q_len
+        kv_offset += kv_len
+    ref = torch.cat(ref_chunks, dim=0)
+    torch.testing.assert_close(out, ref, atol=3e-3, rtol=3e-3)
+
+    grad_out = torch.randn_like(out)
+    out.backward(grad_out)
+    ref.backward(grad_out)
+    torch.testing.assert_close(q.grad, q_ref.grad, atol=4e-3, rtol=4e-3)
+    torch.testing.assert_close(k.grad, k_ref.grad, atol=4e-3, rtol=4e-3)
+    torch.testing.assert_close(v.grad, v_ref.grad, atol=4e-3, rtol=4e-3)
+
+
 @pytest.mark.parametrize(
     ("q_lens", "kv_lens"),
     [
@@ -461,6 +516,46 @@ def test_triton_flash_attn_varlen_mla_paged_matches_eager():
 
     assert out.shape == (sum(q_lens), q_heads, v_head_dim)
     torch.testing.assert_close(out, ref, atol=3e-3, rtol=3e-3)
+
+
+def test_triton_flash_attn_varlen_mla_paged_prefill_decode_bitwise_alignment():
+    torch.manual_seed(45)
+    q_heads = 16
+    kv_heads = 16
+    qk_head_dim = 192
+    v_head_dim = 128
+    page_size = 64
+    dtype = torch.bfloat16
+    kv_lens = [33, 65, 129]
+
+    q_prefill_seqs = [torch.randn(kv_len, q_heads, qk_head_dim, device="cuda", dtype=dtype) for kv_len in kv_lens]
+    k_seqs = [torch.randn(kv_len, kv_heads, qk_head_dim, device="cuda", dtype=dtype) for kv_len in kv_lens]
+    v_seqs = [torch.randn(kv_len, kv_heads, v_head_dim, device="cuda", dtype=dtype) for kv_len in kv_lens]
+
+    prefill_out = _run_paged(q_prefill_seqs, k_seqs, v_seqs, page_size)
+    decode_out = _run_paged([q_seq[-1:] for q_seq in q_prefill_seqs], k_seqs, v_seqs, page_size)
+    nonpaged_out, _ = flash_attn_varlen_func(
+        torch.cat(q_prefill_seqs, dim=0),
+        torch.cat(k_seqs, dim=0),
+        torch.cat(v_seqs, dim=0),
+        cu_seqlens_q=torch.tensor(
+            [0] + [sum(kv_lens[: i + 1]) for i in range(len(kv_lens))], device="cuda", dtype=torch.int32
+        ),
+        cu_seqlens_k=torch.tensor(
+            [0] + [sum(kv_lens[: i + 1]) for i in range(len(kv_lens))], device="cuda", dtype=torch.int32
+        ),
+        max_seqlen_q=max(kv_lens),
+        max_seqlen_k=max(kv_lens),
+        softmax_scale=qk_head_dim**-0.5,
+        causal=True,
+    )
+
+    offset = 0
+    for seq_idx, q_seq in enumerate(q_prefill_seqs):
+        last_idx = offset + q_seq.shape[0] - 1
+        torch.testing.assert_close(prefill_out[last_idx], decode_out[seq_idx], atol=0, rtol=0)
+        torch.testing.assert_close(prefill_out[last_idx], nonpaged_out[last_idx], atol=0, rtol=0)
+        offset += q_seq.shape[0]
 
 
 def test_triton_flash_attn_varlen_paged_backward_raises():

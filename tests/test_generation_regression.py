@@ -45,10 +45,13 @@ def _run_simulation_and_compare(tmp_path: Path, pipeline_parallel_size: int):
     output_dir.mkdir()
 
     model_path = os.environ["VEXACT_TESTS_MODEL_PATH"]
+    attn_impl = os.environ.get("VEXACT_TESTS_ATTN_IMPL", "fa-invariant")
     cmd = get_sys_executable() + [
         str(repo_root / "tests/scripts/hf_inference.py"),
         "--model_path",
         model_path,
+        "--attn_impl",
+        attn_impl,
         "--pipeline_parallel_size",
         str(pipeline_parallel_size),
         "--simulate_requests",
