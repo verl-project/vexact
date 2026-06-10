@@ -69,12 +69,13 @@ jobs:
       - name: Install dependencies
         run: |
           pip3 install uv==0.9.8
-          uv sync --frozen --extra gpu --extra dev --extra veomni
+          uv sync --frozen --extra gpu --extra dev --extra veomni --extra vllm
 
       - name: Run GPU smoke tests
         run: |
           uv run --frozen pytest -s -x tests/batch_invariant_ops/test_matmul.py
           uv run --frozen pytest -s -x tests/batch_invariant_ops/test_fused_moe.py
+          uv run --frozen pytest -s -x tests/test_inferencer_sampling.py
 
   cleanup:
     runs-on: ubuntu-latest
