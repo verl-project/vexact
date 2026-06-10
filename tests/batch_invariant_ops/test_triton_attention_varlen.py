@@ -438,6 +438,31 @@ def test_triton_flash_attn_varlen_qwen3_like_paged_prefill_decode_bitwise_alignm
         offset += q_seq.shape[0]
 
 
+def test_triton_flash_attn_varlen_mla_paged_matches_eager():
+    torch.manual_seed(44)
+    q_heads = 16
+    kv_heads = 16
+    qk_head_dim = 192
+    v_head_dim = 128
+    page_size = 64
+    dtype = torch.bfloat16
+    q_lens = [1, 17, 65]
+    kv_lens = [33, 65, 129]
+
+    q_seqs = [torch.randn(q_len, q_heads, qk_head_dim, device="cuda", dtype=dtype) * 0.1 for q_len in q_lens]
+    k_seqs = [torch.randn(kv_len, kv_heads, qk_head_dim, device="cuda", dtype=dtype) * 0.1 for kv_len in kv_lens]
+    v_seqs = [torch.randn(kv_len, kv_heads, v_head_dim, device="cuda", dtype=dtype) * 0.1 for kv_len in kv_lens]
+
+    out = _run_paged(q_seqs, k_seqs, v_seqs, page_size)
+    ref = torch.cat(
+        [_eager_attention(q, k, v, qk_head_dim**-0.5).to(dtype) for q, k, v in zip(q_seqs, k_seqs, v_seqs)],
+        dim=0,
+    )
+
+    assert out.shape == (sum(q_lens), q_heads, v_head_dim)
+    torch.testing.assert_close(out, ref, atol=3e-3, rtol=3e-3)
+
+
 def test_triton_flash_attn_varlen_paged_backward_raises():
     torch.manual_seed(4)
     q_seqs = [torch.randn(1, 4, 32, device="cuda", dtype=torch.float32, requires_grad=True)]
