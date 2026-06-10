@@ -797,8 +797,15 @@ class _NonpagedFlashAttentionVarlen(torch.autograd.Function):
         block_d = triton.next_power_of_2(max(q.shape[-1], v.shape[-1]))
         if block_d > 256:
             raise ValueError(f"head_dim must be <= 256, got {q.shape[-1]}")
-        block_m = 64 if block_d <= 64 else 32
-        block_n = 64 if block_d <= 64 else 32
+        if block_d <= 64:
+            block_m = 64
+            block_n = 64
+        elif block_d <= 128:
+            block_m = 32
+            block_n = 32
+        else:
+            block_m = 16
+            block_n = 16
         groups = q.shape[1] // k.shape[1]
         num_warps = 4 if block_d <= 64 else 8
 
