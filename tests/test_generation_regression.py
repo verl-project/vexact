@@ -22,9 +22,13 @@ import pytest
 from vexact.utils.subprocess_utils import get_sys_executable
 
 
-def _load_generated_texts(metadata_path: Path) -> list[str]:
+def _load_metadata(metadata_path: Path) -> dict:
     with metadata_path.open("r", encoding="utf-8") as handle:
-        metadata = json.load(handle)
+        return json.load(handle)
+
+
+def _load_generated_texts(metadata_path: Path) -> list[str]:
+    metadata = _load_metadata(metadata_path)
 
     generated_texts = []
     for request_id, entry in metadata.items():
@@ -98,6 +102,13 @@ def _run_simulation_and_compare(tmp_path: Path, pipeline_parallel_size: int):
     assert len(new_outputs) == len(baseline_outputs), (
         f"Expected {len(baseline_outputs)} generated texts, got {len(new_outputs)}"
     )
+
+    if attn_impl != "fa-invariant":
+        new_metadata = _load_metadata(new_metadata_path)
+        for request_id, entry in new_metadata.items():
+            assert entry.get("status") == "completed", f"{request_id} did not complete: {entry}"
+            assert entry.get("response_len", 0) > 0, f"{request_id} produced no response tokens"
+        return
 
     baseline_texts = sorted(baseline_outputs)
     new_texts = sorted(new_outputs)
