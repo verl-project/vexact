@@ -32,6 +32,11 @@ from vexact.inferencer.inferencer import Inferencer
 from vexact.inferencer.model_loader import ModelCreator, load_weights_from_weight_path
 
 
+# Non-default attention backends compare PP hidden-state goldens within one bf16 step.
+_BACKEND_HIDDEN_RTOL = 4e-3
+_BACKEND_HIDDEN_ATOL = 4e-3
+
+
 @pytest.fixture(scope="module")
 def total_hidden_layers() -> int:
     return 3
@@ -159,6 +164,19 @@ def _assert_tensor_on_device(tensor: torch.Tensor, device: torch.device) -> None
         assert tensor.device.index == expected_device.index
 
 
+def _assert_backend_hidden_tensor(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    if get_tests_attn_impl() == "fa-invariant":
+        assert torch.equal(actual.cpu(), expected.cpu())
+        return
+
+    torch.testing.assert_close(
+        actual.cpu(),
+        expected.cpu(),
+        rtol=_BACKEND_HIDDEN_RTOL,
+        atol=_BACKEND_HIDDEN_ATOL,
+    )
+
+
 def test_pp_first_rank(repo_root, model_config, model_path, cache_config, inference_request, device):
     pp_info = PPInfo(3, 0)
     model_creator = ModelCreator(model_config, model_path, device, pp_info)
@@ -184,7 +202,7 @@ def test_pp_first_rank(repo_root, model_config, model_path, cache_config, infere
     expected_intermediate = torch.load(repo_root / "tests/ref_data/first_rank_intermediate.pt")
     actual_intermediate = _real_token_hidden_states(intermediate_outputs.hidden_states, gen_ctx)
     _assert_tensor_on_device(actual_intermediate, device)
-    assert torch.equal(actual_intermediate.cpu(), expected_intermediate.cpu())
+    _assert_backend_hidden_tensor(actual_intermediate, expected_intermediate)
 
 
 def test_pp_mid_rank(repo_root, model_config, model_path, cache_config, inference_request, device):
@@ -214,7 +232,7 @@ def test_pp_mid_rank(repo_root, model_config, model_path, cache_config, inferenc
     expected_intermediate = torch.load(repo_root / "tests/ref_data/mid_rank_intermediate.pt")
     actual_intermediate = _real_token_hidden_states(intermediate_outputs.hidden_states, gen_ctx)
     _assert_tensor_on_device(actual_intermediate, device)
-    assert torch.equal(actual_intermediate.cpu(), expected_intermediate.cpu())
+    _assert_backend_hidden_tensor(actual_intermediate, expected_intermediate)
 
 
 def test_pp_last_rank(
