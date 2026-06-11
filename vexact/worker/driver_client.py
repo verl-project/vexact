@@ -99,3 +99,12 @@ class DriverClient(BaseDriverClient):
     def receive_weights(self) -> list[Any]:
         """Receive model weights via IPC on all workers."""
         return self._execute("receive_weights")
+
+    def get_prefix_cache_stats(self) -> dict:
+        """Return prefix-cache stats from the driver (rank 0).
+
+        The collective hits every rank but only the driver owns the scheduler,
+        so non-driver responses are disabled markers we discard.
+        """
+        results = self._execute("get_prefix_cache_stats")
+        return results[0] if results else {"prefix_cache_enabled": False}
