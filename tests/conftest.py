@@ -27,6 +27,7 @@ from vexact.engine import VeXact
 
 
 def get_tests_attn_impl() -> str:
+    # CI overrides this to exercise alternate attention backends.
     return os.environ.get("VEXACT_TESTS_ATTN_IMPL", "fa-invariant")
 
 
