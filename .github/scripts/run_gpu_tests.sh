@@ -19,7 +19,7 @@ download_model() {
   local model_id="$1"
   local target_dir="$2"
   mkdir -p "${target_dir}"
-  env -u HF_ENDPOINT uv run --frozen hf download "${model_id}" --local-dir "${target_dir}"
+  uv run --frozen hf download "${model_id}" --local-dir "${target_dir}"
 }
 
 run_verifier_pair() {

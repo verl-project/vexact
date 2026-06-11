@@ -12,7 +12,7 @@ mkdir -p "${WORK_ROOT}"
 
 if [[ ! -f "${DATA_DIR}/train.parquet" || ! -f "${DATA_DIR}/test.parquet" ]]; then
   rm -rf "${DATA_DIR}"
-  env -u HF_ENDPOINT uv run --frozen hf download verl-team/gsm8k-v0.4.1 \
+  uv run --frozen hf download verl-team/gsm8k-v0.4.1 \
     --repo-type dataset \
     --include '*.parquet' \
     --local-dir "${DATA_DIR}"
