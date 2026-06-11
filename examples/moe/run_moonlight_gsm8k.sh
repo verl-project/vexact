@@ -15,7 +15,14 @@ model_path=${MODEL_PATH}
 data_path=${DATA_PATH}
 
 # Register vexact rollout globally
-export VERL_USE_EXTERNAL_MODULES=vexact.integrations.verl.register
+vexact_verl_register_module=vexact.integrations.verl.register
+if [[ -n "${VERL_USE_EXTERNAL_MODULES:-}" ]]; then
+    if [[ ",${VERL_USE_EXTERNAL_MODULES}," != *",${vexact_verl_register_module},"* ]]; then
+        export VERL_USE_EXTERNAL_MODULES="${vexact_verl_register_module},${VERL_USE_EXTERNAL_MODULES}"
+    fi
+else
+    export VERL_USE_EXTERNAL_MODULES="${vexact_verl_register_module}"
+fi
 export VERL_LOGGING_LEVEL=DEBUG
 export NCCL_DEBUG=ERROR
 # B200 (SM100+) uses FA4 CUTE kernel for batch-invariant inference

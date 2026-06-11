@@ -26,6 +26,10 @@ from vexact.config import ModelConfig, ParallelConfig, SchedulerConfig, VeXactCo
 from vexact.engine import VeXact
 
 
+def get_tests_attn_impl() -> str:
+    return os.environ.get("VEXACT_TESTS_ATTN_IMPL", "fa-invariant")
+
+
 @pytest.fixture(scope="module")
 def vexact_engine(request):
     """Shared VeXact engine fixture. Use indirect parameterization to set pipeline_parallel_size."""
@@ -35,7 +39,7 @@ def vexact_engine(request):
     config = VeXactConfig(
         model=ModelConfig(
             model_path=model_path,
-            attn_impl="fa-invariant",
+            attn_impl=get_tests_attn_impl(),
             enable_batch_invariant=True,
         ),
         parallel=ParallelConfig(

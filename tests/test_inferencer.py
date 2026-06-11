@@ -18,6 +18,7 @@ import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig, PretrainedConfig
 
+from tests.conftest import get_tests_attn_impl
 from vexact.batch_invariant_ops import (
     disable_batch_invariant_mode,
     enable_batch_invariant_mode,
@@ -52,7 +53,7 @@ def model_config(model_path, device, total_hidden_layers) -> PretrainedConfig:
         "torch_dtype": torch.bfloat16,
         "device_map": {"": device},  # Place entire model on target device
         "trust_remote_code": True,
-        "_attn_implementation": "fa-invariant",
+        "_attn_implementation": get_tests_attn_impl(),
     }
     config = AutoConfig.from_pretrained(model_path, **model_kwargs)
     config.num_hidden_layers = total_hidden_layers
@@ -80,6 +81,7 @@ def inference_request(tokenizer) -> InferenceRequest:
         max_new_tokens=20,
         max_length=100,
         do_sample=False,
+        top_p=1.0,
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
     )
@@ -125,7 +127,7 @@ def test_inferencer_generates_expected_token(
     cache_config, config, model, inference_request, baseline_inferenceroutput, device, model_path
 ):
     vexact_config = VeXactConfig(
-        model=ModelConfig(model_path=model_path, hf_config=config),
+        model=ModelConfig(model_path=model_path, attn_impl=get_tests_attn_impl(), hf_config=config),
         cache=cache_config,
         scheduler=SchedulerConfig(),
     )
@@ -157,13 +159,31 @@ def _assert_tensor_on_device(tensor: torch.Tensor, device: torch.device) -> None
         assert tensor.device.index == expected_device.index
 
 
-def test_pp_first_rank(repo_root, model_config, model_path, cache_config, inference_request, device):
+def _forward_full_model(
+    model: torch.nn.Module,
+    vexact_config: VeXactConfig,
+    inference_request: InferenceRequest,
+    device: torch.device,
+) -> tuple[Inferencer, GenerationContext, torch.nn.Module]:
+    inferencer = Inferencer(
+        model=model,
+        config=vexact_config,
+        pp_info=PPInfo(1, 0),
+        pp_messager=None,
+        device=device,
+        enable_batch_invariant=True,
+    )
+    gen_ctx = inferencer._prepare_gen_ctx([inference_request])
+    return inferencer, gen_ctx, inferencer._forward(gen_ctx)
+
+
+def test_pp_first_rank(repo_root, model_config, model_path, cache_config, inference_request, model, device):
     pp_info = PPInfo(3, 0)
     model_creator = ModelCreator(model_config, model_path, device, pp_info)
     causal_model = model_creator.create_model()
 
     vexact_config = VeXactConfig(
-        model=ModelConfig(model_path=model_path, hf_config=model_config),
+        model=ModelConfig(model_path=model_path, attn_impl=get_tests_attn_impl(), hf_config=model_config),
         cache=cache_config,
         scheduler=SchedulerConfig(),
     )
@@ -179,19 +199,23 @@ def test_pp_first_rank(repo_root, model_config, model_path, cache_config, infere
     gen_ctx = inferencer._prepare_gen_ctx([inference_request])
     intermediate_outputs = inferencer._forward(gen_ctx)
 
-    expected_intermediate = torch.load(repo_root / "tests/ref_data/first_rank_intermediate.pt")
+    if get_tests_attn_impl() == "fa-invariant":
+        expected_intermediate = torch.load(repo_root / "tests/ref_data/first_rank_intermediate.pt")
+    else:
+        _, full_ctx, full_outputs = _forward_full_model(model, vexact_config, inference_request, device)
+        expected_intermediate = _real_token_hidden_states(full_outputs.hidden_states[1], full_ctx)
     actual_intermediate = _real_token_hidden_states(intermediate_outputs.hidden_states, gen_ctx)
     _assert_tensor_on_device(actual_intermediate, device)
     assert torch.equal(actual_intermediate.cpu(), expected_intermediate.cpu())
 
 
-def test_pp_mid_rank(repo_root, model_config, model_path, cache_config, inference_request, device):
+def test_pp_mid_rank(repo_root, model_config, model_path, cache_config, inference_request, model, device):
     pp_info = PPInfo(3, 1)
     model_creator = ModelCreator(model_config, model_path, device, pp_info)
     causal_model = model_creator.create_model()
 
     vexact_config = VeXactConfig(
-        model=ModelConfig(model_path=model_path, hf_config=model_config),
+        model=ModelConfig(model_path=model_path, attn_impl=get_tests_attn_impl(), hf_config=model_config),
         cache=cache_config,
         scheduler=SchedulerConfig(),
     )
@@ -204,26 +228,37 @@ def test_pp_mid_rank(repo_root, model_config, model_path, cache_config, inferenc
         enable_batch_invariant=True,
     )
 
+    full_ctx = None
+    full_outputs = None
     gen_ctx = inferencer._prepare_gen_ctx([inference_request])
     gen_ctx.batch_input_ids = None
-    gen_ctx.intermediate_tensors = torch.load(repo_root / "tests/ref_data/first_rank_intermediate.pt")
+    if get_tests_attn_impl() == "fa-invariant":
+        gen_ctx.intermediate_tensors = torch.load(repo_root / "tests/ref_data/first_rank_intermediate.pt")
+    else:
+        _, full_ctx, full_outputs = _forward_full_model(model, vexact_config, inference_request, device)
+        gen_ctx.intermediate_tensors = _real_token_hidden_states(full_outputs.hidden_states[1], full_ctx)
     intermediate_outputs = inferencer._forward(gen_ctx)
 
-    expected_intermediate = torch.load(repo_root / "tests/ref_data/mid_rank_intermediate.pt")
+    if get_tests_attn_impl() == "fa-invariant":
+        expected_intermediate = torch.load(repo_root / "tests/ref_data/mid_rank_intermediate.pt")
+    else:
+        assert full_ctx is not None
+        assert full_outputs is not None
+        expected_intermediate = _real_token_hidden_states(full_outputs.hidden_states[2], full_ctx)
     actual_intermediate = _real_token_hidden_states(intermediate_outputs.hidden_states, gen_ctx)
     _assert_tensor_on_device(actual_intermediate, device)
     assert torch.equal(actual_intermediate.cpu(), expected_intermediate.cpu())
 
 
 def test_pp_last_rank(
-    repo_root, model_config, model_path, cache_config, inference_request, baseline_inferenceroutput, device
+    repo_root, model_config, model_path, cache_config, inference_request, baseline_inferenceroutput, model, device
 ):
     pp_info = PPInfo(3, 2)
     model_creator = ModelCreator(model_config, model_path, device, pp_info)
     causal_model = model_creator.create_model()
 
     vexact_config = VeXactConfig(
-        model=ModelConfig(model_path=model_path, hf_config=model_config),
+        model=ModelConfig(model_path=model_path, attn_impl=get_tests_attn_impl(), hf_config=model_config),
         cache=cache_config,
         scheduler=SchedulerConfig(),
     )
@@ -238,16 +273,28 @@ def test_pp_last_rank(
 
     gen_ctx = inferencer._prepare_gen_ctx([inference_request])
     gen_ctx.batch_input_ids = None
-    gen_ctx.intermediate_tensors = torch.load(repo_root / "tests/ref_data/mid_rank_intermediate.pt")
+    expected_token_ids = baseline_inferenceroutput.token_ids
+    expected_logits = baseline_inferenceroutput.logits
+    if get_tests_attn_impl() == "fa-invariant":
+        gen_ctx.intermediate_tensors = torch.load(repo_root / "tests/ref_data/mid_rank_intermediate.pt")
+    else:
+        full_inferencer, full_ctx, full_outputs = _forward_full_model(model, vexact_config, inference_request, device)
+        gen_ctx.intermediate_tensors = _real_token_hidden_states(full_outputs.hidden_states[2], full_ctx)
+        expected_token_ids, expected_logits, _ = full_inferencer._select_tokens(
+            [inference_request.generation_config],
+            [len(inference_request.generated_tokens)],
+            full_outputs,
+            full_ctx,
+        )
 
     outputs = inferencer._forward(gen_ctx)
 
     token_ids, logits, logprobs = inferencer._select_tokens(
         [inference_request.generation_config], [len(inference_request.generated_tokens)], outputs, gen_ctx
     )
-    assert torch.equal(token_ids.cpu(), baseline_inferenceroutput.token_ids)
+    assert torch.equal(token_ids.cpu(), expected_token_ids.cpu())
     for i in range(len(logits)):
-        assert torch.equal(logits[i].cpu(), baseline_inferenceroutput.logits[i])
+        assert torch.equal(logits[i].cpu(), expected_logits[i].cpu())
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for cudagraph replay")
@@ -274,7 +321,12 @@ def test_inferencer_cudagraph_decode_matches_eager(model, device, model_path, ca
         return req
 
     vexact_config = VeXactConfig(
-        model=ModelConfig(model_path=model_path, hf_config=model.config, enforce_eager=False),
+        model=ModelConfig(
+            model_path=model_path,
+            attn_impl=get_tests_attn_impl(),
+            hf_config=model.config,
+            enforce_eager=False,
+        ),
         cache=cache_config,
         scheduler=SchedulerConfig(max_num_batched_tokens=2),
     )
@@ -315,7 +367,12 @@ def test_inferencer_cudagraph_decode_matches_eager(model, device, model_path, ca
     inferencer_eager = Inferencer(
         model=model,
         config=VeXactConfig(
-            model=ModelConfig(model_path=model_path, hf_config=model.config, enforce_eager=True),
+            model=ModelConfig(
+                model_path=model_path,
+                attn_impl=get_tests_attn_impl(),
+                hf_config=model.config,
+                enforce_eager=True,
+            ),
             cache=cache_config,
             scheduler=SchedulerConfig(),
         ),
@@ -391,7 +448,12 @@ def _run_inferencer(
     inferencer = Inferencer(
         model=model,
         config=VeXactConfig(
-            model=ModelConfig(model_path=model_path, hf_config=model.config, enforce_eager=enforce_eager),
+            model=ModelConfig(
+                model_path=model_path,
+                attn_impl=get_tests_attn_impl(),
+                hf_config=model.config,
+                enforce_eager=enforce_eager,
+            ),
             cache=cache_config,
             scheduler=SchedulerConfig(max_num_seqs=max_num_seqs, max_num_batched_tokens=max_num_batched_tokens),
         ),

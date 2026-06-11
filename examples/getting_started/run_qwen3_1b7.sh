@@ -13,11 +13,12 @@ export VERL_LOGGING_LEVEL=DEBUG
 export NCCL_DEBUG=ERROR
 # VeOmni Liger Patch
 export VEOMNI_USE_LIGER_KERNEL=0
-# H100 (SM90) uses FA3 kernel for batch-invariant inference
+# Use triton-invariant on A100.
 vexact_attn_implementation=${INFER_FA_IMPL:-fa-invariant}
 vexact_max_cache_blocks=${VEXACT_MAX_CACHE_BLOCKS:-1024}
 # Register and enable actor and ref model FSDP ops
 verl_model_external_lib=vexact.integrations.verl.fsdp_enable_invariant
+# Use triton-invariant on A100.
 veomni_attn_implementation=${VEOMNI_ATTN_IMPLEMENTATION:-"flash_attention_3"}
 moe_implementation=${VEOMNI_MOE_IMPLEMENTATION:-"fused"}
 enforce_eager=${ENFORCE_EAGER:-False}

@@ -26,6 +26,7 @@ import uuid
 import torch
 from transformers import GenerationConfig
 
+from tests.conftest import get_tests_attn_impl
 from vexact.config import ModelConfig, ParallelConfig, SchedulerConfig, VeXactConfig
 from vexact.core.request import InferenceRequest
 from vexact.utils.tokenizer import load_tokenizer
@@ -39,7 +40,7 @@ def test_load_state_dict():
     config = VeXactConfig(
         model=ModelConfig(
             model_path=model_path,
-            attn_impl="fa-invariant",
+            attn_impl=get_tests_attn_impl(),
             enable_batch_invariant=True,
         ),
         parallel=ParallelConfig(pipeline_parallel_size=1),
@@ -76,6 +77,7 @@ def test_load_state_dict():
         gen_config = GenerationConfig(
             max_new_tokens=10,
             do_sample=False,
+            top_p=1.0,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
         )
@@ -88,6 +90,7 @@ def test_load_state_dict():
         # Generate with original weights
         print("\n3. Generating with original weights...")
         result = generate(input_ids, gen_config)
+        assert result is not None
         original_tokens = result.generated_tokens
         original_text = tokenizer.decode(original_tokens, skip_special_tokens=True)
         print(f"   Generated tokens: {original_tokens}")
@@ -109,6 +112,7 @@ def test_load_state_dict():
         # Generate with modified weights
         print("\n6. Generating with modified weights...")
         result = generate(input_ids, gen_config)
+        assert result is not None
         modified_tokens = result.generated_tokens
         modified_text = tokenizer.decode(modified_tokens, skip_special_tokens=True)
         print(f"   Generated tokens: {modified_tokens}")
@@ -129,6 +133,7 @@ def test_load_state_dict():
         # Generate with restored weights
         print("\n9. Generating with restored weights...")
         result = generate(input_ids, gen_config)
+        assert result is not None
         restored_tokens = result.generated_tokens
         restored_text = tokenizer.decode(restored_tokens, skip_special_tokens=True)
         print(f"   Generated tokens: {restored_tokens}")

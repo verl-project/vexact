@@ -25,7 +25,14 @@ try:
 except ImportError:
     FA4_AVAILABLE = False
 
-pytestmark = pytest.mark.skipif(not FA4_AVAILABLE, reason="flash_attn.cute (FA4) not available")
+pytestmark = [
+    pytest.mark.skipif(not FA4_AVAILABLE, reason="flash_attn.cute (FA4) not available"),
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for FA4 tests"),
+    pytest.mark.skipif(
+        torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 9,
+        reason="flash_attn.cute paged KV requires SM90+",
+    ),
+]
 
 torch.set_default_device("cuda")
 

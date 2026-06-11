@@ -19,12 +19,20 @@ from pathlib import Path
 
 import pytest
 
+from vexact.core.request import RequestStatus
 from vexact.utils.subprocess_utils import get_sys_executable
 
 
-def _load_generated_texts(metadata_path: Path) -> list[str]:
+_COMPLETED_METADATA_STATUS = {"completed", RequestStatus.FINISHED.value}
+
+
+def _load_metadata(metadata_path: Path) -> dict:
     with metadata_path.open("r", encoding="utf-8") as handle:
-        metadata = json.load(handle)
+        return json.load(handle)
+
+
+def _load_generated_texts(metadata_path: Path) -> list[str]:
+    metadata = _load_metadata(metadata_path)
 
     generated_texts = []
     for request_id, entry in metadata.items():
@@ -45,10 +53,13 @@ def _run_simulation_and_compare(tmp_path: Path, pipeline_parallel_size: int):
     output_dir.mkdir()
 
     model_path = os.environ["VEXACT_TESTS_MODEL_PATH"]
+    attn_impl = os.environ.get("VEXACT_TESTS_ATTN_IMPL", "fa-invariant")
     cmd = get_sys_executable() + [
         str(repo_root / "tests/scripts/hf_inference.py"),
         "--model_path",
         model_path,
+        "--attn_impl",
+        attn_impl,
         "--pipeline_parallel_size",
         str(pipeline_parallel_size),
         "--simulate_requests",
@@ -95,6 +106,13 @@ def _run_simulation_and_compare(tmp_path: Path, pipeline_parallel_size: int):
     assert len(new_outputs) == len(baseline_outputs), (
         f"Expected {len(baseline_outputs)} generated texts, got {len(new_outputs)}"
     )
+
+    if attn_impl != "fa-invariant":
+        new_metadata = _load_metadata(new_metadata_path)
+        for request_id, entry in new_metadata.items():
+            assert entry.get("status") in _COMPLETED_METADATA_STATUS, f"{request_id} did not complete: {entry}"
+            assert entry.get("response_len", 0) > 0, f"{request_id} produced no response tokens"
+        return
 
     baseline_texts = sorted(baseline_outputs)
     new_texts = sorted(new_outputs)

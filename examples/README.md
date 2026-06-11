@@ -40,13 +40,12 @@ bash examples/getting_started/run_qwen3_1b7.sh
 
 ### Setting model and dataset paths
 
-The defaults point to the Arnold-style mount `/mnt/hdfs/model_path` and
-`/mnt/hdfs/data_path`. Override via environment variables or by editing the
-script:
+Set the model and dataset directories via environment variables:
 
 ```bash
 model_dir=/path/to/Qwen3-1.7B \
-data_dir=/path/to/gsm8k \
+train_path=/path/to/train \
+test_path=/path/to/val \
 bash examples/getting_started/run_qwen3_1b7.sh
 ```
 
@@ -68,6 +67,14 @@ On B200 (SM100+) the FA4 CUTE kernel is used:
 
 ```bash
 export INFER_FA_IMPL=fa-invariant-cute   # FA4, B200
+```
+
+On A100 (SM80), use the Triton batch-invariant backend:
+
+```bash
+INFER_FA_IMPL=triton-invariant \
+VEOMNI_ATTN_IMPLEMENTATION=triton-invariant \
+bash examples/getting_started/run_qwen3_1b7.sh
 ```
 
 ## `verify/` — why batch invariance matters in RL
