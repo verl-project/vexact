@@ -99,5 +99,5 @@ VEXACT_TESTS_MOE_IMPL=fused_triton run_verifier_pair \
 
 if [[ "${VEXACT_RUN_VERL_SMOKE:-1}" == "1" ]]; then
   echo "Running Moonlight-16B-A3B-Instruct VeRL smoke test"
-  bash .github/scripts/run_verl_smoke.sh "${MOONLIGHT_MODEL_PATH}"
+  VEOMNI_MOE_IMPLEMENTATION=fused_triton bash .github/scripts/run_verl_smoke.sh "${MOONLIGHT_MODEL_PATH}"
 fi
