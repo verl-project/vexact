@@ -15,10 +15,31 @@ show_disk_usage() {
   du -sh "${MODEL_ROOT}" 2>/dev/null || true
 }
 
+debug_hf_env() {
+  echo "Selected HF/proxy env before unsetting HF_ENDPOINT:"
+  for name in HF_ENDPOINT HF_HUB_ENABLE_HF_TRANSFER HF_TOKEN HF_HUB_TOKEN HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY; do
+    if [[ -n "${!name:-}" ]]; then
+      echo "${name}=<set>"
+    else
+      echo "${name}=<unset>"
+    fi
+  done
+  echo "Selected HF/proxy env after unsetting HF_ENDPOINT:"
+  env -u HF_ENDPOINT bash -c 'for name in HF_ENDPOINT HF_HUB_ENABLE_HF_TRANSFER HF_TOKEN HF_HUB_TOKEN HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY; do if [[ -n "${!name:-}" ]]; then echo "${name}=<set>"; else echo "${name}=<unset>"; fi; done'
+  env -u HF_ENDPOINT uv run --frozen python - <<'PY' || true
+import os
+from huggingface_hub.constants import ENDPOINT
+
+print(f"python os.environ HF_ENDPOINT={os.environ.get('HF_ENDPOINT')!r}")
+print(f"huggingface_hub.constants.ENDPOINT={ENDPOINT!r}")
+PY
+}
+
 download_model() {
   local model_id="$1"
   local target_dir="$2"
   mkdir -p "${target_dir}"
+  debug_hf_env
   env -u HF_ENDPOINT uv run --frozen hf download "${model_id}" --local-dir "${target_dir}"
 }
 
