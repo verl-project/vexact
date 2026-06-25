@@ -40,7 +40,9 @@ Off-policy logprob bias from vLLM causes the rollout-correction KL to explode af
 
 ## Example Recipes
 
-End-to-end RL training scripts live under [`examples/`](examples/README.md). Run any script from the repo root:
+End-to-end RL training scripts live under [`examples/`](examples/README.md),
+covering Qwen3-1.7B/30B-A3B and Moonlight-16B-A3B (GRPO/DAPO/REINFORCE) plus
+the dense `verify/` pair, on H100/B200. Run any script from the repo root:
 
 ```bash
 bash examples/getting_started/run_qwen3_1b7.sh
@@ -48,19 +50,9 @@ bash examples/getting_started/run_qwen3_1b7.sh
 model_dir=/path/to/model data_dir=/path/to/data bash examples/moe/run_qwen3_30B_A3B_dapo.sh
 ```
 
-| Recipe                                                                              | Model                         | Dataset                   | Hardware | Algorithm     |
-| ----------------------------------------------------------------------------------- | ----------------------------- | ------------------------- | -------- | ------------- |
-| [`getting_started/run_qwen3_1b7.sh`](examples/getting_started/run_qwen3_1b7.sh)     | Qwen3-1.7B                    | gsm8k                     | 1×8H100  | GRPO          |
-| [`moe/run_qwen3_30B_A3B_dapo.sh`](examples/moe/run_qwen3_30B_A3B_dapo.sh)           | Qwen3-30B-A3B                 | DAPO-Math-17k / AIME 2025 | 1×8H100  | DAPO          |
-| [`moe/run_qwen3_30B_A3B_reinforce.sh`](examples/moe/run_qwen3_30B_A3B_reinforce.sh) | Qwen3-30B-A3B-Base            | DAPO-Math-17k / AIME 2024 | 8×8H100  | REINFORCE     |
-| [`moe/run_qwen3_30B_A3B_16H100.sh`](examples/moe/run_qwen3_30B_A3B_16H100.sh)       | Qwen3-30B-A3B                 | gsm8k                     | 2×8H100  | GRPO          |
-| [`moe/run_qwen3_30B_A3B_8B200.sh`](examples/moe/run_qwen3_30B_A3B_8B200.sh)         | Qwen3-30B-A3B                 | gsm8k                     | 1×8B200  | GRPO          |
-| [`moe/run_moonlight_gsm8k.sh`](examples/moe/run_moonlight_gsm8k.sh)                 | Moonlight-16B-A3B-Instruct    | gsm8k                     | 1×8B200  | GRPO          |
-| [`moe/run_moonlight_reinforce.sh`](examples/moe/run_moonlight_reinforce.sh)         | Moonlight-16B-A3B-Instruct    | DAPO-Math-17k / AIME 2024 | 1×8B200  | REINFORCE     |
-| [`verify/run_dense_vexact.sh`](examples/verify/run_dense_vexact.sh)                 | DeepSeek-R1-Distill-Qwen-1.5B | MATH / AIME 2024+2025     | 1×8H100  | GRPO (vexact) |
-| [`verify/run_dense_vllm.sh`](examples/verify/run_dense_vllm.sh)                     | DeepSeek-R1-Distill-Qwen-1.5B | MATH / AIME 2024+2025     | 1×8H100  | GRPO (vllm)   |
-
-See [`examples/README.md`](examples/README.md) for path configuration, attention backend selection, and an explanation of the `verify/` pair.
+See [`examples/README.md`](examples/README.md) for the full recipe list, path
+configuration, attention backend selection, and an explanation of the
+`verify/` pair.
 
 ## Installation
 
@@ -78,31 +70,11 @@ uv sync --extra gpu
 uv sync --extra gpu --extra verl --extra veomni --extra dev
 ```
 
-What each extra does:
-
-- `gpu` — PyTorch (CUDA 12.9), FlashAttention 2/3/4, quack-kernels, NVML.
-- `verl` — pulls verl from `verl-project/verl` (pinned by commit in
-    `[tool.uv.sources]`) plus FastAPI/uvicorn/cachetools used by the trainer.
-- `veomni` — pulls VeOmni from `ByteDance-Seed/VeOmni` (pinned by commit).
-- `vllm` — vLLM 0.18 if you prefer it as the rollout engine instead of
-    VeXact's native one.
-- `dev` — `pytest`, `pytest-asyncio`, `pre-commit` for development.
-
-### Working on verl or VeOmni locally
-
-`verl` and `veomni` are pinned by git commit in `pyproject.toml`'s
-`[tool.uv.sources]` block, so contributors and CI all resolve to the same
-upstream. To hack on either upstream against your local checkout, swap the
-relevant entry to `editable = true` (the file has inline hints):
-
-```toml
-[tool.uv.sources]
-verl = { path = "./verl", editable = true }
-veomni = { path = "./VeOmni", editable = true }
-```
-
-Then `uv sync --extra gpu --extra verl --extra veomni` re-resolves the venv
-to your local tree.
+Extras: `gpu` (PyTorch + FlashAttention + kernels), `verl` and `veomni`
+(upstreams pinned by commit), `vllm` (alternative rollout engine), `dev`
+(test/lint tooling). `verl` and `veomni` are pinned in `pyproject.toml`'s
+`[tool.uv.sources]` block; to develop against a local checkout, set
+`editable = true` there (inline hints included).
 
 ## Components
 
