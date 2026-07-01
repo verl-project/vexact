@@ -84,7 +84,7 @@ def _patch_lazy_imports_for_fa4():
 
     _original_lazy_imports = fa_utils._lazy_imports
 
-    def _patched_lazy_imports(implementation):
+    def _patched_lazy_imports(implementation, *args, **kwargs):
         if implementation == "flash_attention_4":
             from types import SimpleNamespace
 
@@ -95,9 +95,11 @@ def _patch_lazy_imports_for_fa4():
                 SimpleNamespace(
                     flash_attn_func=flash_attn_func,
                     flash_attn_varlen_func=flash_attn_varlen_func,
-                )
+                ),
+                *args,
+                **kwargs,
             )
-        return _original_lazy_imports(implementation)
+        return _original_lazy_imports(implementation, *args, **kwargs)
 
     fa_utils._lazy_imports = _patched_lazy_imports
 

@@ -37,11 +37,11 @@ verl = [
 ]
 veomni = [
     "veomni",
-    # VeOmni's default install pins transformers==5.2.0 (via its
+    # VeOmni's default install pins transformers==5.9.0 (via its
     # `transformers-stable` dependency group). Mirror that pin here so vexact
     # users picking up the veomni extra resolve to the same version VeOmni
     # tests/develops against.
-    "transformers==5.2.0",
+    "transformers==5.9.0",
 ]
 
 [build-system]
@@ -130,7 +130,7 @@ known-third-party = [
 verl = { git = "https://github.com/verl-project/verl.git", rev = "61f29997fb026a5a269dafccfe2f3bb800e32ef4" }
 # To work on verl locally, point this at `{ path = "./verl", editable = true }`.
 # To work on VeOmni locally, point this at `{ path = "./VeOmni", editable = true }`.
-veomni = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "a4ed599119afb21f5e559f15e95635f0edbbc5c6" }
+veomni = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "ff89f19056599b868b6dbfeb224c90c39eb1b4de" }
 torch = [
     { index = "pytorch", extra = "gpu" },
 ]
@@ -155,9 +155,6 @@ no-build-isolation-package = ["flash-attn"]
 environments = ["sys_platform == 'linux'"]
 override-dependencies = [
     "opencv-python-headless<4.13.0",
-    # vllm 0.19.1's metadata still excludes transformers 5.0.*-5.4.* (only
-    # 5.5.1+ is whitelisted), but VeOmni pins transformers==5.2.0. Override
-    # vllm's conservative ceiling so the `vllm` and `veomni` extras can
-    # coexist; vllm 0.19.1 runs fine against transformers 5.2 in practice.
-    "transformers==5.2.0",
+    # Keep the vllm and veomni extras on the same Transformers version.
+    "transformers==5.9.0",
 ]
