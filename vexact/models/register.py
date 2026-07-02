@@ -30,31 +30,31 @@ def register_models() -> None:
     if not disable_vexact_patch:
         # Bind VeOmni's fused MoE kernel so the rollout side reuses the same
         # implementation as VeOmni's actor side (required for bitwise
-        # alignment on MoE archs). Prefer quack (SM90+, what VeOmni's
-        # ``moe_implementation=fused`` resolves to on GPU) and fall back to
-        # triton if quack is unavailable.
+        # alignment on MoE archs). Use Triton on SM90/Hopper and quack on
+        # SM100+/Blackwell, matching vexact.batch_invariant_ops.fused_moe.
         #
         # ``register_models`` runs in every verl process that imports vexact,
         # including CPU-only AgentLoopWorker / data workers that don't have
         # the GPU kernels available. Skip silently there.
+        import torch
+
         from veomni.ops.kernels.moe import apply_veomni_fused_moe_patch
 
-        moe_kernel = os.getenv("VEXACT_MOE_KERNEL", "quack")
+        preferred_moe_kernel = "triton"
         try:
-            apply_veomni_fused_moe_patch(fused_moe_kernel=moe_kernel)
-            print(f"[VEXACT] register_models(): bound VeOmni fused MoE kernel ({moe_kernel})")
-        except RuntimeError as e_quack:
-            try:
-                apply_veomni_fused_moe_patch(fused_moe_kernel="triton")
-                print(
-                    f"[VEXACT] register_models(): bound VeOmni fused MoE kernel "
-                    f"(triton, '{moe_kernel}' unavailable: {e_quack})"
-                )
-            except RuntimeError as e_triton:
-                print(
-                    "[VEXACT] register_models(): skipping VeOmni MoE kernel binding "
-                    f"(no GPU kernel available: quack={e_quack}; triton={e_triton})"
-                )
+            if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10:
+                preferred_moe_kernel = "quack"
+        except RuntimeError:
+            pass
+
+        try:
+            apply_veomni_fused_moe_patch(fused_moe_kernel=preferred_moe_kernel)
+            print(f"[VEXACT] register_models(): bound VeOmni fused MoE kernel ({preferred_moe_kernel})")
+        except RuntimeError as preferred_error:
+            print(
+                "[VEXACT] register_models(): skipping VeOmni MoE kernel binding "
+                f"(no GPU kernel available: {preferred_moe_kernel}={preferred_error})"
+            )
 
         from .qwen3_moe.modeling_qwen3_moe import apply_qwen3_moe_patches
 
