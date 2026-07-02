@@ -468,9 +468,8 @@ def fused_moe_forward(
     routing_weights = routing_weights.bfloat16()
     hidden_states = hidden_states.bfloat16()
     from vexact.utils.device import DEVICE_MAJOR
-    from vexact.utils.moe_backend import select_fused_moe_kernel
 
-    if select_fused_moe_kernel(device_major=DEVICE_MAJOR) == "quack":
+    if DEVICE_MAJOR >= 10:
         expert_fn = QuackFusedMoeExpertFunction
     else:
         expert_fn = FusedMoeExpertFunction

@@ -36,10 +36,17 @@ def register_models() -> None:
         # ``register_models`` runs in every verl process that imports vexact,
         # including CPU-only AgentLoopWorker / data workers that don't have
         # the GPU kernels available. Skip silently there.
-        from veomni.ops.kernels.moe import apply_veomni_fused_moe_patch
-        from vexact.utils.moe_backend import select_fused_moe_kernel
+        import torch
 
-        preferred_moe_kernel = select_fused_moe_kernel(os.getenv("VEXACT_MOE_KERNEL"))
+        from veomni.ops.kernels.moe import apply_veomni_fused_moe_patch
+
+        preferred_moe_kernel = "triton"
+        try:
+            if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10:
+                preferred_moe_kernel = "quack"
+        except RuntimeError:
+            pass
+
         try:
             apply_veomni_fused_moe_patch(fused_moe_kernel=preferred_moe_kernel)
             print(f"[VEXACT] register_models(): bound VeOmni fused MoE kernel ({preferred_moe_kernel})")

@@ -23,7 +23,6 @@ if not torch.cuda.is_available():
 
 import vexact.batch_invariant_ops.fused_moe as fused_moe
 import vexact.utils.device as device_utils
-from vexact.utils.moe_backend import select_fused_moe_kernel
 
 
 class _SentinelExpert:
@@ -68,12 +67,15 @@ def test_hopper_uses_triton_fused_moe(monkeypatch):
     assert not quack_called
 
 
-def test_blackwell_uses_quack_fused_moe(monkeypatch):
+def test_blackwell_or_newer_uses_quack_fused_moe(monkeypatch):
     triton_called, quack_called = _run_selection(monkeypatch, device_major=10)
 
     assert not triton_called
     assert quack_called
 
 
-def test_hopper_env_override_does_not_select_quack():
-    assert select_fused_moe_kernel("quack", device_major=9) == "triton"
+def test_sm11_uses_quack_fused_moe(monkeypatch):
+    triton_called, quack_called = _run_selection(monkeypatch, device_major=11)
+
+    assert not triton_called
+    assert quack_called
