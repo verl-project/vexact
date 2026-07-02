@@ -36,33 +36,18 @@ def register_models() -> None:
         # ``register_models`` runs in every verl process that imports vexact,
         # including CPU-only AgentLoopWorker / data workers that don't have
         # the GPU kernels available. Skip silently there.
-        from vexact.utils.moe_backend import select_fused_moe_kernel
         from veomni.ops.kernels.moe import apply_veomni_fused_moe_patch
+        from vexact.utils.moe_backend import select_fused_moe_kernel
 
         preferred_moe_kernel = select_fused_moe_kernel(os.getenv("VEXACT_MOE_KERNEL"))
-        fallback_moe_kernel = "triton" if preferred_moe_kernel != "triton" else None
         try:
             apply_veomni_fused_moe_patch(fused_moe_kernel=preferred_moe_kernel)
             print(f"[VEXACT] register_models(): bound VeOmni fused MoE kernel ({preferred_moe_kernel})")
         except RuntimeError as preferred_error:
-            if fallback_moe_kernel is None:
-                print(
-                    "[VEXACT] register_models(): skipping VeOmni MoE kernel binding "
-                    f"(no GPU kernel available: {preferred_moe_kernel}={preferred_error})"
-                )
-            else:
-                try:
-                    apply_veomni_fused_moe_patch(fused_moe_kernel=fallback_moe_kernel)
-                    print(
-                        f"[VEXACT] register_models(): bound VeOmni fused MoE kernel "
-                        f"({fallback_moe_kernel}, '{preferred_moe_kernel}' unavailable: {preferred_error})"
-                    )
-                except RuntimeError as fallback_error:
-                    print(
-                        "[VEXACT] register_models(): skipping VeOmni MoE kernel binding "
-                        f"(no GPU kernel available: {preferred_moe_kernel}={preferred_error}; "
-                        f"{fallback_moe_kernel}={fallback_error})"
-                    )
+            print(
+                "[VEXACT] register_models(): skipping VeOmni MoE kernel binding "
+                f"(no GPU kernel available: {preferred_moe_kernel}={preferred_error})"
+            )
 
         from .qwen3_moe.modeling_qwen3_moe import apply_qwen3_moe_patches
 

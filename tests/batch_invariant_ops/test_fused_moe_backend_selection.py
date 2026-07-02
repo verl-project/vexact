@@ -14,8 +14,9 @@
 
 """Backend selection tests for fused MoE."""
 
-import torch
 import pytest
+import torch
+
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA is required to import fused MoE kernels", allow_module_level=True)
