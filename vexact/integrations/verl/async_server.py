@@ -335,8 +335,7 @@ class VeXactServer:
         """Receive model weights and record their version after a successful update."""
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, self.engine.driver_client.receive_weights)
-        if global_steps is not None:
-            self.global_steps = global_steps
+        self.global_steps = global_steps
         return result
 
     async def start_profile(self, **kwargs):  # noqa: ARG002

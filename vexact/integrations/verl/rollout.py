@@ -93,7 +93,7 @@ class ServerAdapter(BaseRollout):
     async def update_weights(
         self,
         weights: Generator[tuple[str, torch.Tensor], None, None],
-        global_steps: int = None,
+        global_steps: int | None = None,
         **kwargs,  # noqa: ARG002
     ):
         """Update model weights via bucketed IPC transfer to inference workers."""

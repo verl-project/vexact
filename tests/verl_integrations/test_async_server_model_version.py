@@ -66,6 +66,17 @@ async def test_failed_weight_update_keeps_previous_model_version():
     assert server.global_steps == 6
 
 
+@pytest.mark.asyncio
+async def test_unversioned_weight_update_clears_previous_model_version():
+    server = VeXactServer.__new__(VeXactServer)
+    server.global_steps = 6
+    server.engine = SimpleNamespace(driver_client=SimpleNamespace(receive_weights=lambda: None))
+
+    await server.receive_weights()
+
+    assert server.global_steps is None
+
+
 class _RemoteMethod:
     def __init__(self, name, calls):
         self.name = name
