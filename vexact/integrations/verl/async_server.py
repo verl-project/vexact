@@ -102,6 +102,7 @@ class VeXactServer:
         # Server state
         self._server_address = ray.util.get_node_ip_address().strip("[]")
         self._server_port = None
+        self.global_steps = None
 
         # Engine will be initialized in launch_server
         self.engine = None
@@ -279,6 +280,7 @@ class VeXactServer:
             routed_experts=None,  # VeXact doesn't support routing replay
             stop_reason=stop_reason,
             num_preempted=None,
+            extra_fields={"global_steps": self.global_steps},
         )
 
     async def wake_up(self, tags: Optional[list[str]] = None):
@@ -329,10 +331,13 @@ class VeXactServer:
         """Abort a specific generation request."""
         return {"aborted": False, "request_id": request_id, "error": "VeXact doesn't support request abortion"}
 
-    async def receive_weights(self):
-        """Receive model weights via IPC on all workers."""
+    async def receive_weights(self, global_steps: Optional[int] = None):
+        """Receive model weights and record their version after a successful update."""
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self.engine.driver_client.receive_weights)
+        result = await loop.run_in_executor(None, self.engine.driver_client.receive_weights)
+        if global_steps is not None:
+            self.global_steps = global_steps
+        return result
 
     async def start_profile(self, **kwargs):  # noqa: ARG002
         """Start profiling on the server."""
