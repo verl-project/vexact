@@ -154,6 +154,7 @@ def flash_attention_forward(
         assert DEVICE_MAJOR >= 9, f"FA4 (flash_attn.cute) requires SM90+, got SM{DEVICE_MAJOR}0"
         from flash_attn.cute import flash_attn_varlen_func
 
+        window_size = _get_fa_window_size(sliding_window)
         attn_output, _ = flash_attn_varlen_func(
             q=query_flat,  # (total_q, nH, D)
             k=key_cache_blocks,  # (num_blocks, page_size, nKVH, D)
@@ -166,6 +167,7 @@ def flash_attention_forward(
             page_table=block_tables,  # (B, max_num_blocks_per_seq) int32
             softmax_scale=scaling,
             causal=True,
+            window_size=window_size,
             num_splits=1,
         )
     else:

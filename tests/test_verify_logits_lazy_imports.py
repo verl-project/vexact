@@ -46,6 +46,19 @@ def test_fa4_lazy_imports_patch_forwards_transformers_kwargs(monkeypatch):
     assert calls == [("flash_attention_3", None, True)]
 
 
+def test_fa4_lazy_imports_patch_keeps_native_support(monkeypatch):
+    def original_lazy_imports(implementation, attention_wrapper=None, allow_all_kernels=False):
+        if implementation == "flash_attention_4":
+            return "native"
+        return "other"
+
+    monkeypatch.setattr(fa_utils, "_lazy_imports", original_lazy_imports)
+
+    patch_lazy_imports_for_fa4 = _load_patch_lazy_imports_for_fa4()
+    assert patch_lazy_imports_for_fa4() is True
+    assert fa_utils._lazy_imports is original_lazy_imports
+
+
 def test_fa4_lazy_imports_patch_forwards_fa4_kwargs(monkeypatch):
     calls = []
 

@@ -37,11 +37,18 @@ def test_get_fa_window_size_rejects_non_positive_values(sliding_window):
         _get_fa_window_size(sliding_window)
 
 
+@pytest.mark.parametrize("use_cute", [False, True], ids=["fa3", "fa4"])
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_fa3_sliding_window_matches_reference():
-    if torch.cuda.get_device_capability()[0] != 9:
-        pytest.skip("FA3 requires SM90")
-    pytest.importorskip("flash_attn_interface")
+def test_flash_attention_sliding_window_matches_reference(use_cute):
+    device_major = torch.cuda.get_device_capability()[0]
+    if use_cute:
+        if device_major < 9:
+            pytest.skip("FA4 requires SM90+")
+        pytest.importorskip("flash_attn.cute")
+    else:
+        if device_major != 9:
+            pytest.skip("FA3 requires SM90")
+        pytest.importorskip("flash_attn_interface")
 
     torch.manual_seed(0)
     device = torch.device("cuda")
@@ -77,6 +84,7 @@ def test_fa3_sliding_window_matches_reference():
         attention_mask=None,
         scaling=scaling,
         sliding_window=sliding_window,
+        use_cute=use_cute,
     )
 
     scores = torch.matmul(query.float(), key.float().transpose(-1, -2)) * scaling

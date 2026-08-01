@@ -71,18 +71,24 @@ ALL_ATTENTION_FUNCTIONS["triton-invariant"] = triton_flash_attention_forward_imp
 
 def _patch_lazy_imports_for_fa4():
     """
-    Transformers now cannot properly support flash_attention_4.
-    For v4.57.3, we have to patch like this.
-    Monkey-patch transformers' _lazy_imports to handle "flash_attention_4".
+    Patch older Transformers releases to support flash_attention_4.
 
     On transformers v4.57.3, _lazy_imports has no built-in branch for FA4 — the string
     "flash_attention_4" falls through to the getattr() kernels-fallback which fails on
     a plain string. We intercept it and load flash_attn.cute locally, following the same
     approach as VeOmni's flash_attn/__init__.py.
     """
+    import inspect
+
     import transformers.modeling_flash_attention_utils as fa_utils
 
     _original_lazy_imports = fa_utils._lazy_imports
+    try:
+        lazy_imports_source = inspect.getsource(_original_lazy_imports)
+    except (OSError, TypeError):
+        lazy_imports_source = ""
+    if 'implementation == "flash_attention_4"' in lazy_imports_source:
+        return True
 
     def _patched_lazy_imports(implementation, *args, **kwargs):
         if implementation == "flash_attention_4":
@@ -102,9 +108,10 @@ def _patch_lazy_imports_for_fa4():
         return _original_lazy_imports(implementation, *args, **kwargs)
 
     fa_utils._lazy_imports = _patched_lazy_imports
+    return False
 
 
-_patch_lazy_imports_for_fa4()
+_TRANSFORMERS_HAS_NATIVE_FA4 = _patch_lazy_imports_for_fa4()
 
 
 def _fa4_attention_forward(
@@ -122,9 +129,8 @@ def _fa4_attention_forward(
     """
     Flash Attention 4 (flash_attn.cute) forward registered in ALL_ATTENTION_FUNCTIONS.
 
-    On transformers v4.57.3, we pass the FA4 kernel as a SimpleNamespace object via the
-    implementation= kwarg so _lazy_imports resolves it via the getattr() fallback.
-    See VeOmni's flash_attn/__init__.py for reference.
+    Older Transformers releases need the FA4 kernel passed as a SimpleNamespace;
+    newer releases accept the native ``flash_attention_4`` implementation name.
     """
     from types import SimpleNamespace
 
@@ -150,10 +156,12 @@ def _fa4_attention_forward(
     if is_causal is None:
         is_causal = module.is_causal
 
-    fa4_kernel = SimpleNamespace(
-        flash_attn_func=flash_attn_func,
-        flash_attn_varlen_func=flash_attn_varlen_func,
-    )
+    fa4_implementation = "flash_attention_4"
+    if not _TRANSFORMERS_HAS_NATIVE_FA4:
+        fa4_implementation = SimpleNamespace(
+            flash_attn_func=flash_attn_func,
+            flash_attn_varlen_func=flash_attn_varlen_func,
+        )
 
     attn_output = _transformers_flash_attention_forward(
         query,
@@ -168,7 +176,7 @@ def _fa4_attention_forward(
         softcap=softcap,
         use_top_left_mask=False,
         target_dtype=target_dtype,
-        implementation=fa4_kernel,
+        implementation=fa4_implementation,
         layer_idx=module.layer_idx if hasattr(module, "layer_idx") else None,
         **kwargs,
     )

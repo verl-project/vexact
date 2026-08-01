@@ -61,7 +61,7 @@ batch_invariant_ops/
 
 Two attention backends, both supporting paged KV cache:
 
-- **Flash Attention** — Uses `flash_attn_with_kvcache` (FA3, SM90) or `flash_attn.cute` (FA4, SM90+/SM100). The FA3 path supports causal sliding-window attention. Requires `is_paged_attn=True` in the KV cache context. Forces `num_splits=1` for determinism.
+- **Flash Attention** — Uses `flash_attn_with_kvcache` (FA3, SM90) or `flash_attn.cute` (FA4, SM90+/SM100). Both paths support causal sliding-window attention. Requires `is_paged_attn=True` in the KV cache context. Forces `num_splits=1` for determinism.
 - **Flex Attention** — Uses `torch.nn.attention.flex_attention` with custom `mask_mod` for causal masking. Supports both packed (non-paged) and paged modes. Paged mode builds a physical-to-logical block mapping and caches the block mask across layers.
 
 Both expect the KV cache context to be set via `set_kv_cache_context()` before the forward pass.
