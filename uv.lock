@@ -1484,14 +1484,14 @@ wheels = [
 
 [[package]]
 name = "numpy"
-version = "1.26.4"
+version = "2.2.6"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/65/6e/09db70a523a96d25e115e71cc56a6f9031e7b8cd166c1ac8438307c14058/numpy-1.26.4.tar.gz", hash = "sha256:2a02aba9ed12e4ac4eb3ea9421c420301a0c6460d9830d74a9df87efa4912010", size = 15786129, upload-time = "2024-02-06T00:26:44.495Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/76/21/7d2a95e4bba9dc13d043ee156a356c0a8f0c6309dff6b21b4d71a073b8a8/numpy-2.2.6.tar.gz", hash = "sha256:e29554e2bef54a90aa5cc07da6ce955accb83f21ab5de01a62c8478897b264fd", size = 20276440, upload-time = "2025-05-17T22:38:04.611Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/79/f8/97f10e6755e2a7d027ca783f63044d5b1bc1ae7acb12afe6a9b4286eac17/numpy-1.26.4-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:9fad7dcb1aac3c7f0584a5a8133e3a43eeb2fe127f47e3632d43d677c66c102b", size = 13925109, upload-time = "2024-02-05T23:56:20.368Z" },
-    { url = "https://files.pythonhosted.org/packages/0f/50/de23fde84e45f5c4fda2488c759b69990fd4512387a8632860f3ac9cd225/numpy-1.26.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:675d61ffbfa78604709862923189bad94014bef562cc35cf61d3a07bba02a7ed", size = 17950613, upload-time = "2024-02-05T23:56:56.054Z" },
-    { url = "https://files.pythonhosted.org/packages/4c/0c/9c603826b6465e82591e05ca230dfc13376da512b25ccd0894709b054ed0/numpy-1.26.4-cp312-cp312-musllinux_1_1_aarch64.whl", hash = "sha256:ab47dbe5cc8210f55aa58e4805fe224dac469cde56b9f731a4c098b91917159a", size = 13572172, upload-time = "2024-02-05T23:57:21.56Z" },
-    { url = "https://files.pythonhosted.org/packages/76/8c/2ba3902e1a0fc1c74962ea9bb33a534bb05984ad7ff9515bf8d07527cadd/numpy-1.26.4-cp312-cp312-musllinux_1_1_x86_64.whl", hash = "sha256:1dda2e7b4ec9dd512f84935c5f126c8bd8b9f2fc001e9f54af255e8c5f16b0e0", size = 17786643, upload-time = "2024-02-05T23:57:56.585Z" },
+    { url = "https://files.pythonhosted.org/packages/f8/35/8c80729f1ff76b3921d5c9487c7ac3de9b2a103b1cd05e905b3090513510/numpy-2.2.6-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:f2618db89be1b4e05f7a1a847a9c1c0abd63e63a1607d892dd54668dd92faf87", size = 14018462, upload-time = "2025-05-17T21:35:42.174Z" },
+    { url = "https://files.pythonhosted.org/packages/8c/3d/1e1db36cfd41f895d266b103df00ca5b3cbe965184df824dec5c08c6b803/numpy-2.2.6-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:fd83c01228a688733f1ded5201c678f0c53ecc1006ffbc404db9f7a899ac6249", size = 16527618, upload-time = "2025-05-17T21:36:06.711Z" },
+    { url = "https://files.pythonhosted.org/packages/61/c6/03ed30992602c85aa3cd95b9070a514f8b3c33e31124694438d88809ae36/numpy-2.2.6-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:37c0ca431f82cd5fa716eca9506aefcabc247fb27ba69c5062a6d3ade8cf8f49", size = 15505511, upload-time = "2025-05-17T21:36:29.965Z" },
+    { url = "https://files.pythonhosted.org/packages/b7/25/5761d832a81df431e260719ec45de696414266613c9ee268394dd5ad8236/numpy-2.2.6-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:fe27749d33bb772c80dcd84ae7e8df2adc920ae8297400dabec45f0dedb3f6de", size = 18313783, upload-time = "2025-05-17T21:36:56.883Z" },
 ]
 
 [[package]]
@@ -3010,6 +3010,25 @@ wheels = [
 ]
 
 [[package]]
+name = "transferqueue"
+version = "0.1.9"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "hydra-core", marker = "sys_platform == 'linux'" },
+    { name = "msgspec", marker = "sys_platform == 'linux'" },
+    { name = "numpy", marker = "sys_platform == 'linux'" },
+    { name = "omegaconf", marker = "sys_platform == 'linux'" },
+    { name = "prometheus-client", marker = "sys_platform == 'linux'" },
+    { name = "psutil", marker = "sys_platform == 'linux'" },
+    { name = "pyzmq", marker = "sys_platform == 'linux'" },
+    { name = "ray", extra = ["default"], marker = "sys_platform == 'linux'" },
+    { name = "tensordict", marker = "sys_platform == 'linux'" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/26/24/2bc71f4c3c14f44f4b28d7559d204809c5556b3d19421140f45521f79c95/transferqueue-0.1.9-py3-none-any.whl", hash = "sha256:729f21f393d092a4ac2f23840a61b56923bda73b86db197c4d7c9f11accc0421", size = 342944, upload-time = "2026-07-12T12:29:32.995Z" },
+]
+
+[[package]]
 name = "transformers"
 version = "5.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3121,7 +3140,7 @@ wheels = [
 [[package]]
 name = "veomni"
 version = "0.1.11"
-source = { git = "https://github.com/ByteDance-Seed/VeOmni.git?rev=ff89f19056599b868b6dbfeb224c90c39eb1b4de#ff89f19056599b868b6dbfeb224c90c39eb1b4de" }
+source = { git = "https://github.com/ByteDance-Seed/VeOmni.git?rev=9651e80750a7d204d69423d71063c2987b03bf08#9651e80750a7d204d69423d71063c2987b03bf08" }
 dependencies = [
     { name = "blobfile", marker = "sys_platform == 'linux'" },
     { name = "datasets", marker = "sys_platform == 'linux'" },
@@ -3138,8 +3157,8 @@ dependencies = [
 
 [[package]]
 name = "verl"
-version = "0.8.0.dev0"
-source = { git = "https://github.com/verl-project/verl.git?rev=61f29997fb026a5a269dafccfe2f3bb800e32ef4#61f29997fb026a5a269dafccfe2f3bb800e32ef4" }
+version = "0.9.0.dev0"
+source = { git = "https://github.com/verl-project/verl.git?rev=e9618406de5bad40041d7612554e465ec2003ec1#e9618406de5bad40041d7612554e465ec2003ec1" }
 dependencies = [
     { name = "accelerate", marker = "sys_platform == 'linux'" },
     { name = "codetiming", marker = "sys_platform == 'linux'" },
@@ -3195,6 +3214,7 @@ veomni = [
 verl = [
     { name = "cachetools", marker = "sys_platform == 'linux'" },
     { name = "fastapi", marker = "sys_platform == 'linux'" },
+    { name = "transferqueue", marker = "sys_platform == 'linux'" },
     { name = "uvicorn", marker = "sys_platform == 'linux'" },
     { name = "verl", marker = "sys_platform == 'linux'" },
 ]
@@ -3220,11 +3240,12 @@ requires-dist = [
     { name = "torch-memory-saver", marker = "platform_machine != 'aarch64'", specifier = "==0.0.9" },
     { name = "torchaudio", marker = "extra == 'gpu'", index = "https://download.pytorch.org/whl/cu129" },
     { name = "torchvision", marker = "extra == 'gpu'", index = "https://download.pytorch.org/whl/cu129" },
+    { name = "transferqueue", marker = "extra == 'verl'", specifier = "==0.1.9" },
     { name = "transformers" },
     { name = "transformers", marker = "extra == 'veomni'", specifier = "==5.9.0" },
     { name = "uvicorn", marker = "extra == 'verl'" },
-    { name = "veomni", marker = "extra == 'veomni'", git = "https://github.com/ByteDance-Seed/VeOmni.git?rev=ff89f19056599b868b6dbfeb224c90c39eb1b4de" },
-    { name = "verl", marker = "extra == 'verl'", git = "https://github.com/verl-project/verl.git?rev=61f29997fb026a5a269dafccfe2f3bb800e32ef4" },
+    { name = "veomni", marker = "extra == 'veomni'", git = "https://github.com/ByteDance-Seed/VeOmni.git?rev=9651e80750a7d204d69423d71063c2987b03bf08" },
+    { name = "verl", marker = "extra == 'verl'", git = "https://github.com/verl-project/verl.git?rev=e9618406de5bad40041d7612554e465ec2003ec1" },
     { name = "vllm", marker = "extra == 'vllm'", specifier = "==0.19.1" },
 ]
 provides-extras = ["gpu", "dev", "vllm", "verl", "veomni"]

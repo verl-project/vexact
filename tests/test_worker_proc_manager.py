@@ -53,11 +53,14 @@ class MockConfig:
     parallel: MockParallelConfig
 
 
-def test_cuda_visible_devices():
+def test_cuda_visible_devices(monkeypatch):
     """Test that CUDA_VISIBLE_DEVICES is set correctly for each worker subprocess."""
     from vexact.worker.worker_proc_manager import WorkerProcManager
 
     world_size = 4
+    # Make the mapping under test explicit instead of depending on the host
+    # having at least four physical GPUs.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", ",".join(str(rank) for rank in range(world_size)))
     config = MockConfig(parallel=MockParallelConfig(world_size=world_size))
     manager = WorkerProcManager(config=config, proxy_cls=MockProxy)
 

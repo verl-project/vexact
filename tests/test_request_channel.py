@@ -80,7 +80,9 @@ def start_server(address: str, num_outputs: int = 1) -> tuple[multiprocessing.Pr
     process.start()
 
     # Wait for server to be ready
-    status = result_queue.get(timeout=20)
+    # Importing the full GPU stack in a spawned process can take more than
+    # 20 seconds on a cold worker.
+    status = result_queue.get(timeout=60)
     assert status == "ready"
 
     import time

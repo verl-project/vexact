@@ -31,6 +31,9 @@ vllm = [
 ]
 verl = [
     "verl",
+    # VeRL's v1 trainer imports TransferQueue unconditionally, but the
+    # upstream package does not currently declare it as a dependency.
+    "TransferQueue==0.1.9",
     "uvicorn",
     "fastapi",
     "cachetools",
@@ -127,10 +130,10 @@ known-third-party = [
 ]
 
 [tool.uv.sources]
-verl = { git = "https://github.com/verl-project/verl.git", rev = "61f29997fb026a5a269dafccfe2f3bb800e32ef4" }
+verl = { git = "https://github.com/verl-project/verl.git", rev = "e9618406de5bad40041d7612554e465ec2003ec1" }
 # To work on verl locally, point this at `{ path = "./verl", editable = true }`.
 # To work on VeOmni locally, point this at `{ path = "./VeOmni", editable = true }`.
-veomni = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "ff89f19056599b868b6dbfeb224c90c39eb1b4de" }
+veomni = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "9651e80750a7d204d69423d71063c2987b03bf08" }
 torch = [
     { index = "pytorch", extra = "gpu" },
 ]
