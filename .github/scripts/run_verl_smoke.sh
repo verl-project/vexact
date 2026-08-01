@@ -30,6 +30,7 @@ export VEOMNI_ATTN_IMPL="${VEOMNI_ATTN_IMPL:-flash_attention_2}"
 export VEXACT_MAX_CACHE_BLOCKS="${VEXACT_MAX_CACHE_BLOCKS:-512}"
 
 PIPELINE_PARALLELISM="${VEXACT_VERL_PIPELINE_PARALLELISM:-8}"
+N_GPUS_PER_NODE="${VEXACT_VERL_N_GPUS_PER_NODE:-8}"
 
 MODEL_PATH="${MODEL_PATH}" DATA_PATH="${DATA_PATH}" RAY_DEDUP_LOGS=1 PYTHONUNBUFFERED=1 \
   bash examples/moe/run_moonlight_gsm8k.sh \
@@ -40,6 +41,7 @@ MODEL_PATH="${MODEL_PATH}" DATA_PATH="${DATA_PATH}" RAY_DEDUP_LOGS=1 PYTHONUNBUF
     actor_rollout_ref.actor.ppo_mini_batch_size=8 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=512 \
+    actor_rollout_ref.actor.veomni.fsdp_size="${N_GPUS_PER_NODE}" \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.n=1 \
@@ -52,6 +54,7 @@ MODEL_PATH="${MODEL_PATH}" DATA_PATH="${DATA_PATH}" RAY_DEDUP_LOGS=1 PYTHONUNBUF
     trainer.test_freq=-1 \
     trainer.total_training_steps=1 \
     trainer.val_before_train=False \
+    trainer.n_gpus_per_node="${N_GPUS_PER_NODE}" \
     trainer.logger=[console] 2>&1 | tee "${LOG_FILE}"
 
 uv run --frozen python - "${LOG_FILE}" <<'PY'
