@@ -7,6 +7,7 @@ export TOKENIZERS_PARALLELISM=false
 MODEL_ROOT="${RUNNER_TEMP:-/tmp}/vexact-models"
 QWEN_MODEL_PATH="${MODEL_ROOT}/Qwen3-1.7B"
 MOONLIGHT_MODEL_PATH="${MODEL_ROOT}/Moonlight-16B-A3B-Instruct"
+OLMO3_MODEL_PATH="${MODEL_ROOT}/Olmo-3-7B-Think-SFT"
 
 show_disk_usage() {
   local label="$1"
@@ -31,6 +32,8 @@ run_verifier_pair() {
   local max_cache_blocks="${6:-}"
   local skip_backward="${7:-false}"
   local logprobs_from_logits="${8:-false}"
+  local model_backend="${9:-veomni}"
+  local verifier_attn_impl="${10:-${VEXACT_TESTS_ATTN_IMPL}}"
 
   rm -rf "${output_dir}"
   local inference_cmd=(
@@ -57,8 +60,8 @@ run_verifier_pair() {
     uv run --frozen python tests/scripts/verify_logits_vs_native_hf.py
     --model_path "${model_path}"
     --data_dir "${output_dir}"
-    --attn_impl "${VEXACT_TESTS_ATTN_IMPL}"
-    --model_backend veomni
+    --attn_impl "${verifier_attn_impl}"
+    --model_backend "${model_backend}"
     --enable_batch_invariant
     --use_remove_padding
     --rtol 0
@@ -73,6 +76,10 @@ run_verifier_pair() {
     verify_cmd+=(--skip_backward)
   fi
   "${verify_cmd[@]}"
+}
+
+supports_sm90_or_newer() {
+  uv run --frozen python -c 'import torch; raise SystemExit(0 if torch.cuda.get_device_capability()[0] >= 9 else 1)'
 }
 
 show_disk_usage "before model downloads"
@@ -96,6 +103,22 @@ show_disk_usage "after Moonlight-16B-A3B-Instruct download"
 echo "Running Moonlight-16B-A3B-Instruct VExact/VeOmni bitwise verifier"
 VEXACT_TESTS_MOE_IMPL=fused_triton run_verifier_pair \
   "${MOONLIGHT_MODEL_PATH}" "${RUNNER_TEMP:-/tmp}/moonlight-vexact-triton-outputs" 64 4 2 32 true true
+
+if supports_sm90_or_newer; then
+  echo "Downloading Olmo-3-7B-Think-SFT to ${OLMO3_MODEL_PATH}"
+  download_model "allenai/Olmo-3-7B-Think-SFT" "${OLMO3_MODEL_PATH}"
+  show_disk_usage "after Olmo-3-7B-Think-SFT download"
+
+  echo "Running Olmo-3-7B-Think-SFT FA3 bitwise verifier"
+  VEXACT_TESTS_ATTN_IMPL=fa-invariant run_verifier_pair \
+    "${OLMO3_MODEL_PATH}" "${RUNNER_TEMP:-/tmp}/olmo3-vexact-fa3-outputs" 256 4 2 64 true true hf flash_attention_3
+
+  echo "Running Olmo-3-7B-Think-SFT FA4 bitwise verifier"
+  VEXACT_TESTS_ATTN_IMPL=fa-invariant-cute run_verifier_pair \
+    "${OLMO3_MODEL_PATH}" "${RUNNER_TEMP:-/tmp}/olmo3-vexact-fa4-outputs" 256 4 2 64 true true hf flash_attention_4
+else
+  echo "Skipping Olmo-3-7B-Think-SFT FA3/FA4 bitwise verifiers: requires SM90 or newer"
+fi
 
 if [[ "${VEXACT_RUN_VERL_SMOKE:-1}" == "1" ]]; then
   echo "Running Moonlight-16B-A3B-Instruct VeRL smoke test"

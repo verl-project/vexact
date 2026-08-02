@@ -22,6 +22,19 @@ import triton.profiler as proton
 from vexact.batch_invariant_ops.kv_cache_context import store_kvcache
 
 
+def _get_fa_window_size(sliding_window: Optional[int]) -> tuple[int, int]:
+    """Translate a Transformers causal window into FlashAttention boundaries."""
+    if sliding_window is None:
+        return (-1, -1)
+    if sliding_window <= 0:
+        raise ValueError(f"sliding_window must be positive, got {sliding_window}")
+
+    # FlashAttention's boundaries are inclusive, while Transformers defines
+    # sliding_window as the total number of visible tokens (including self).
+    window_bound = sliding_window - 1
+    return (window_bound, window_bound)
+
+
 @proton.scope("flash_attention_forward")
 def flash_attention_forward(
     module: nn.Module,
@@ -55,16 +68,14 @@ def flash_attention_forward(
         attention_mask (Optional[torch.Tensor]): An optional attention mask. Not actively used.
         scaling (float): The scaling factor for the attention scores.
         dropout (float): The dropout rate. Not currently used.
+        sliding_window (Optional[int]): The number of tokens visible in causal local-attention layers,
+            including the current token. ``None`` selects full causal attention.
 
     Returns:
         Tuple[torch.Tensor, None]: A tuple containing the attention output and None.
             The attention output has a shape of (total_query_tokens, num_attention_heads, head_dim).
     """
     from .kv_cache_context import get_kv_cache_context
-
-    # window_size = (-1, -1)
-    # if sliding_window is not None:
-    #     window_size = (sliding_window, -1)
 
     # Get KV cache context
     kv_context = get_kv_cache_context()
@@ -143,6 +154,7 @@ def flash_attention_forward(
         assert DEVICE_MAJOR >= 9, f"FA4 (flash_attn.cute) requires SM90+, got SM{DEVICE_MAJOR}0"
         from flash_attn.cute import flash_attn_varlen_func
 
+        window_size = _get_fa_window_size(sliding_window)
         attn_output, _ = flash_attn_varlen_func(
             q=query_flat,  # (total_q, nH, D)
             k=key_cache_blocks,  # (num_blocks, page_size, nKVH, D)
@@ -155,12 +167,14 @@ def flash_attention_forward(
             page_table=block_tables,  # (B, max_num_blocks_per_seq) int32
             softmax_scale=scaling,
             causal=True,
+            window_size=window_size,
             num_splits=1,
         )
     else:
         assert DEVICE_MAJOR == 9, f"FA3 requires SM90, got SM{DEVICE_MAJOR}0"
         from flash_attn_interface import flash_attn_with_kvcache
 
+        window_size = _get_fa_window_size(sliding_window)
         attn_output = flash_attn_with_kvcache(
             query_flat,
             key_cache_blocks,
@@ -173,7 +187,7 @@ def flash_attention_forward(
             softmax_scale=scaling,
             causal=True,
             page_table=block_tables,
-            # window_size=window_size
+            window_size=window_size,
             num_splits=1,
         )
     # Output shape: (H, total_query_tokens, D)
