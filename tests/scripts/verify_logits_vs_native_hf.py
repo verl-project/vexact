@@ -42,6 +42,7 @@ from transformers.modeling_flash_attention_utils import (
     _flash_attention_forward as _transformers_flash_attention_forward,
 )
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+from transformers.utils.versions import require_version
 
 from vexact.batch_invariant_ops import flash_attention_forward as flash_attention_forward_impl
 from vexact.batch_invariant_ops import flash_attention_forward_cute as flash_attention_forward_cute_impl
@@ -61,57 +62,14 @@ if not logging.root.handlers:
 logger = logging.getLogger(__name__)
 logger.setLevel("INFO")
 
+require_version("transformers>=5.4.0", "FlashAttention 4 verification requires native Transformers FA4 support.")
+
 _register_models()
 # Register two invariant attention implementations
 ALL_ATTENTION_FUNCTIONS["flex"] = flex_attention_forward
 ALL_ATTENTION_FUNCTIONS["fa-invariant"] = flash_attention_forward_impl
 ALL_ATTENTION_FUNCTIONS["fa-invariant-cute"] = flash_attention_forward_cute_impl
 ALL_ATTENTION_FUNCTIONS["triton-invariant"] = triton_flash_attention_forward_impl
-
-
-def _patch_lazy_imports_for_fa4():
-    """
-    Patch older Transformers releases to support flash_attention_4.
-
-    On transformers v4.57.3, _lazy_imports has no built-in branch for FA4 — the string
-    "flash_attention_4" falls through to the getattr() kernels-fallback which fails on
-    a plain string. We intercept it and load flash_attn.cute locally, following the same
-    approach as VeOmni's flash_attn/__init__.py.
-    """
-    import inspect
-
-    import transformers.modeling_flash_attention_utils as fa_utils
-
-    _original_lazy_imports = fa_utils._lazy_imports
-    try:
-        lazy_imports_source = inspect.getsource(_original_lazy_imports)
-    except (OSError, TypeError):
-        lazy_imports_source = ""
-    if 'implementation == "flash_attention_4"' in lazy_imports_source:
-        return True
-
-    def _patched_lazy_imports(implementation, *args, **kwargs):
-        if implementation == "flash_attention_4":
-            from types import SimpleNamespace
-
-            from flash_attn.cute import flash_attn_func, flash_attn_varlen_func
-
-            # Pass the kernel as a SimpleNamespace so the getattr() fallback resolves it
-            return _original_lazy_imports(
-                SimpleNamespace(
-                    flash_attn_func=flash_attn_func,
-                    flash_attn_varlen_func=flash_attn_varlen_func,
-                ),
-                *args,
-                **kwargs,
-            )
-        return _original_lazy_imports(implementation, *args, **kwargs)
-
-    fa_utils._lazy_imports = _patched_lazy_imports
-    return False
-
-
-_TRANSFORMERS_HAS_NATIVE_FA4 = _patch_lazy_imports_for_fa4()
 
 
 def _fa4_attention_forward(
@@ -126,15 +84,7 @@ def _fa4_attention_forward(
     softcap=None,
     **kwargs,
 ):
-    """
-    Flash Attention 4 (flash_attn.cute) forward registered in ALL_ATTENTION_FUNCTIONS.
-
-    Older Transformers releases need the FA4 kernel passed as a SimpleNamespace;
-    newer releases accept the native ``flash_attention_4`` implementation name.
-    """
-    from types import SimpleNamespace
-
-    from flash_attn.cute import flash_attn_func, flash_attn_varlen_func
+    """Flash Attention 4 forward registered in ALL_ATTENTION_FUNCTIONS."""
 
     seq_len = query.shape[2]
 
@@ -156,13 +106,6 @@ def _fa4_attention_forward(
     if is_causal is None:
         is_causal = module.is_causal
 
-    fa4_implementation = "flash_attention_4"
-    if not _TRANSFORMERS_HAS_NATIVE_FA4:
-        fa4_implementation = SimpleNamespace(
-            flash_attn_func=flash_attn_func,
-            flash_attn_varlen_func=flash_attn_varlen_func,
-        )
-
     attn_output = _transformers_flash_attention_forward(
         query,
         key,
@@ -176,7 +119,7 @@ def _fa4_attention_forward(
         softcap=softcap,
         use_top_left_mask=False,
         target_dtype=target_dtype,
-        implementation=fa4_implementation,
+        implementation="flash_attention_4",
         layer_idx=module.layer_idx if hasattr(module, "layer_idx") else None,
         **kwargs,
     )
