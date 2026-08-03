@@ -143,6 +143,11 @@ class ModelConfig:
         if self.hf_config is None:
             self._load_hf_config()
 
+        if getattr(self.hf_config, "model_type", None) == "gpt_oss" and self.attn_impl != "fa-invariant-cute":
+            raise ValueError(
+                f"GPT-OSS learnable attention sinks require attn_impl='fa-invariant-cute'; got {self.attn_impl!r}"
+            )
+
         # Initialize max_model_len
         self._initialize_max_model_len()
 

@@ -35,6 +35,17 @@ def _get_fa_window_size(sliding_window: Optional[int]) -> tuple[int, int]:
     return (window_bound, window_bound)
 
 
+def _get_fa_learnable_sink(
+    s_aux: Optional[torch.Tensor], query: torch.Tensor, use_cute: bool
+) -> Optional[torch.Tensor]:
+    """Translate Transformers' attention sink argument to the supported FA backend."""
+    if s_aux is None:
+        return None
+    if not use_cute:
+        raise NotImplementedError("Learnable attention sinks require the FA4 (fa-invariant-cute) backend")
+    return s_aux.to(dtype=query.dtype)
+
+
 @proton.scope("flash_attention_forward")
 def flash_attention_forward(
     module: nn.Module,
@@ -45,6 +56,7 @@ def flash_attention_forward(
     scaling: float,
     dropout: float = 0.0,
     sliding_window: Optional[int] = None,
+    s_aux: Optional[torch.Tensor] = None,
     use_cute: bool = False,
     **kwargs,
 ):
@@ -70,6 +82,7 @@ def flash_attention_forward(
         dropout (float): The dropout rate. Not currently used.
         sliding_window (Optional[int]): The number of tokens visible in causal local-attention layers,
             including the current token. ``None`` selects full causal attention.
+        s_aux (Optional[torch.Tensor]): Per-head learnable attention sink logits. Supported by FA4 only.
 
     Returns:
         Tuple[torch.Tensor, None]: A tuple containing the attention output and None.
@@ -150,6 +163,7 @@ def flash_attention_forward(
     # max_seqlen_k = context_lens.max().item()
     from vexact.utils.device import DEVICE_MAJOR
 
+    learnable_sink = _get_fa_learnable_sink(s_aux, query, use_cute)
     if use_cute:
         assert DEVICE_MAJOR >= 9, f"FA4 (flash_attn.cute) requires SM90+, got SM{DEVICE_MAJOR}0"
         from flash_attn.cute import flash_attn_varlen_func
@@ -168,6 +182,7 @@ def flash_attention_forward(
             softmax_scale=scaling,
             causal=True,
             window_size=window_size,
+            learnable_sink=learnable_sink,
             num_splits=1,
         )
     else:

@@ -15,7 +15,11 @@
 import pytest
 import torch
 
-from vexact.batch_invariant_ops.flash_attention import _get_fa_window_size, flash_attention_forward
+from vexact.batch_invariant_ops.flash_attention import (
+    _get_fa_learnable_sink,
+    _get_fa_window_size,
+    flash_attention_forward,
+)
 from vexact.batch_invariant_ops.kv_cache_context import set_kv_cache_context
 
 
@@ -35,6 +39,21 @@ def test_get_fa_window_size(sliding_window, expected):
 def test_get_fa_window_size_rejects_non_positive_values(sliding_window):
     with pytest.raises(ValueError, match="sliding_window must be positive"):
         _get_fa_window_size(sliding_window)
+
+
+def test_get_fa_learnable_sink_casts_to_query_dtype():
+    query = torch.empty(1, dtype=torch.bfloat16)
+    sink = torch.randn(2, dtype=torch.float32)
+
+    actual = _get_fa_learnable_sink(sink, query, use_cute=True)
+
+    assert actual.dtype == query.dtype
+    torch.testing.assert_close(actual.float(), sink.to(torch.bfloat16).float())
+
+
+def test_get_fa_learnable_sink_rejects_fa3():
+    with pytest.raises(NotImplementedError, match="require the FA4"):
+        _get_fa_learnable_sink(torch.zeros(2), torch.empty(1), use_cute=False)
 
 
 @pytest.mark.parametrize("use_cute", [False, True], ids=["fa3", "fa4"])
@@ -94,6 +113,65 @@ def test_flash_attention_sliding_window_matches_reference(use_cute):
     mask = (key_positions <= query_positions) & (key_positions > query_positions - sliding_window)
     scores.masked_fill_(~mask, float("-inf"))
     expected = torch.matmul(torch.softmax(scores, dim=-1), value.float())
+    expected = expected.transpose(1, 2).reshape_as(actual)
+
+    torch.testing.assert_close(actual.float(), expected, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_fa4_learnable_sink_matches_reference():
+    if torch.cuda.get_device_capability()[0] < 9:
+        pytest.skip("FA4 requires SM90+")
+    pytest.importorskip("flash_attn.cute")
+
+    torch.manual_seed(1)
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    batch_size, seq_len, num_heads, head_dim = 1, 16, 2, 64
+    page_size = 256
+    sliding_window = 4
+    scaling = head_dim**-0.5
+
+    query = torch.randn(batch_size, num_heads, seq_len, head_dim, device=device, dtype=dtype)
+    key = torch.randn_like(query)
+    value = torch.randn_like(query)
+    sinks = torch.randn(num_heads, device=device, dtype=dtype)
+    key_cache = torch.zeros(1, page_size, num_heads, head_dim, device=device, dtype=dtype)
+    value_cache = torch.zeros_like(key_cache)
+    set_kv_cache_context(
+        is_paged_attn=True,
+        key_cache={0: key_cache},
+        value_cache={0: value_cache},
+        block_tables=torch.tensor([[0]], device=device, dtype=torch.int32),
+        context_lens=torch.tensor([seq_len], device=device, dtype=torch.int32),
+        slot_mapping=torch.arange(seq_len, device=device, dtype=torch.int64),
+        query_start_loc=torch.tensor([0, seq_len], device=device, dtype=torch.int32),
+        max_seqlen_q=seq_len,
+    )
+
+    module = torch.nn.Module()
+    module.layer_idx = 0
+    actual, _ = flash_attention_forward(
+        module,
+        query,
+        key,
+        value,
+        attention_mask=None,
+        scaling=scaling,
+        sliding_window=sliding_window,
+        s_aux=sinks,
+        use_cute=True,
+    )
+
+    scores = torch.matmul(query.float(), key.float().transpose(-1, -2)) * scaling
+    positions = torch.arange(seq_len, device=device)
+    query_positions = positions[:, None]
+    key_positions = positions[None, :]
+    mask = (key_positions <= query_positions) & (key_positions > query_positions - sliding_window)
+    scores.masked_fill_(~mask, float("-inf"))
+    sink_scores = sinks.float().view(1, num_heads, 1, 1).expand(batch_size, -1, seq_len, -1)
+    attention_probs = torch.softmax(torch.cat((scores, sink_scores), dim=-1), dim=-1)[..., :-1]
+    expected = torch.matmul(attention_probs, value.float())
     expected = expected.transpose(1, 2).reshape_as(actual)
 
     torch.testing.assert_close(actual.float(), expected, rtol=2e-2, atol=2e-2)
