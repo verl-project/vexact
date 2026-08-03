@@ -32,3 +32,25 @@ def test_gpt_oss_accepts_fa4_attention():
     config = ModelConfig(model_path="unused", attn_impl="fa-invariant-cute", hf_config=_gpt_oss_config())
 
     assert config.attn_impl == "fa-invariant-cute"
+
+
+def test_gpt_oss_rejects_non_quack_fused_moe():
+    with pytest.raises(ValueError, match="requires moe_implementation='fused_quack'"):
+        ModelConfig(
+            model_path="unused",
+            attn_impl="fa-invariant-cute",
+            moe_implementation="fused_triton",
+            hf_config=_gpt_oss_config(),
+        )
+
+
+@pytest.mark.parametrize("moe_implementation", ["fused_quack", "eager"])
+def test_gpt_oss_accepts_supported_moe_implementations(moe_implementation):
+    config = ModelConfig(
+        model_path="unused",
+        attn_impl="fa-invariant-cute",
+        moe_implementation=moe_implementation,
+        hf_config=_gpt_oss_config(),
+    )
+
+    assert config.moe_implementation == moe_implementation

@@ -13,17 +13,19 @@
 # limitations under the License.
 
 import os
+import sys
 
 import pytest
 import torch
 from torch import nn
-from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
+from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 
 from vexact.config import PPInfo
 from vexact.inferencer.model_loader import (
     ModelCreator,
     PPMissingLayer,
     TransformersForCausalLM,
+    _create_causal_model,
     load_weights_from_weight_iterator,
 )
 
@@ -191,3 +193,36 @@ def test_pp_wrapper_load_weights_accepts_model_prefix_keys():
     assert torch.equal(base_model.embed_tokens.weight, new_embed)
     assert torch.equal(base_model.proj.weight, new_proj)
     assert torch.equal(lm_head.weight, new_lm_head)
+
+
+def test_gpt_oss_model_uses_veomni_modeling_and_moe_slot(monkeypatch):
+    class DummySlot:
+        def __init__(self):
+            self.impl = None
+
+        def bind(self, impl):
+            self.impl = impl
+
+    class DummyModel(PreTrainedModel):
+        config_class = PretrainedConfig
+
+        def __init__(self, config):
+            super().__init__(config)
+
+    slot = DummySlot()
+    modeling_module = sys.modules[__name__]
+    monkeypatch.setattr(modeling_module, "veomni_moe_experts_forward", slot, raising=False)
+    monkeypatch.setattr(DummyModel, "__module__", __name__)
+    monkeypatch.setattr(
+        "veomni.models.transformers.gpt_oss.register_gpt_oss_modeling",
+        lambda architecture: DummyModel,
+    )
+    config = PretrainedConfig(architectures=["GptOssForCausalLM"])
+    config.model_type = "gpt_oss"
+    config._attn_implementation = "fa-invariant-cute"
+
+    model = _create_causal_model(config, "fused_quack")
+
+    assert isinstance(model, DummyModel)
+    assert slot.impl == "quack"
+    assert model.config._attn_implementation == "fa-invariant-cute"
