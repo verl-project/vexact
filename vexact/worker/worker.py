@@ -102,11 +102,7 @@ class Worker(WorkerBase):
 
         # Load model
         self.model = ModelCreator(
-            self.config.model.hf_config,
-            config.model.model_path,
-            self.device,
-            self.pp_info,
-            moe_implementation=config.model.moe_implementation,
+            self.config.model.hf_config, config.model.model_path, self.device, self.pp_info
         ).create_model()
 
         # Create PP messager if needed

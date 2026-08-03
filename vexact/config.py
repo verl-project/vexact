@@ -102,9 +102,7 @@ class ModelConfig:
     )
     moe_implementation: str = field(
         default="fused_quack",
-        metadata={
-            "help": "MoE experts implementation shared with the VeOmni actor (fused_quack or eager for GPT-OSS)."
-        },
+        metadata={"help": "MoE experts implementation. GPT-OSS supports fused_quack only."},
     )
     enable_batch_invariant: bool = field(
         default=True,
@@ -154,10 +152,9 @@ class ModelConfig:
                 raise ValueError(
                     f"GPT-OSS learnable attention sinks require attn_impl='fa-invariant-cute'; got {self.attn_impl!r}"
                 )
-            if self.moe_implementation not in ("fused_quack", "eager"):
+            if self.moe_implementation != "fused_quack":
                 raise ValueError(
-                    "GPT-OSS requires moe_implementation='fused_quack' (SM90+) or 'eager'; "
-                    f"got {self.moe_implementation!r}"
+                    f"GPT-OSS requires moe_implementation='fused_quack' (SM90+); got {self.moe_implementation!r}"
                 )
 
         # Initialize max_model_len

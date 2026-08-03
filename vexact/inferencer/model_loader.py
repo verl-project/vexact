@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import logging
-import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Generator, Iterable, Optional
@@ -35,38 +34,6 @@ _register_models()
 
 # Module-level logger
 logger = logging.getLogger(__name__)
-
-
-def _create_causal_model(config: PretrainedConfig, moe_implementation: str) -> PreTrainedModel:
-    """Construct a causal model, using VeOmni's GPT-OSS modeling and MoE dispatch when required."""
-    if getattr(config, "model_type", None) != "gpt_oss":
-        return AutoModelForCausalLM.from_config(config)
-
-    from veomni.models.transformers.gpt_oss import register_gpt_oss_modeling
-
-    architectures = getattr(config, "architectures", None) or ["GptOssForCausalLM"]
-    architecture = architectures[0] if isinstance(architectures, (list, tuple)) else architectures
-    model_cls = register_gpt_oss_modeling(architecture)
-    modeling_module = sys.modules[model_cls.__module__]
-
-    # VeOmni config values use a ``fused_`` prefix while OpSlot registry names do not.
-    # Binding the same choice as the actor is what makes strict rollout/training
-    # probability alignment meaningful for GPT-OSS's interleaved gate/up experts.
-    moe_impl = "eager" if moe_implementation == "eager" else moe_implementation.removeprefix("fused_")
-    modeling_module.veomni_moe_experts_forward.bind(moe_impl)
-    logger.info("GPT-OSS rollout uses VeOmni modeling with MoE implementation %s", moe_implementation)
-
-    # Transformers validates attention backend names in PreTrainedModel.__init__,
-    # before Vexact's custom dispatcher is consulted. GPT-OSS uses runtime
-    # attention dispatch, so initialize its unchanged module structure with an
-    # accepted backend name and restore Vexact's backend immediately afterward.
-    attn_implementation = config._attn_implementation
-    config._attn_implementation = "eager"
-    try:
-        model = model_cls(config)
-    finally:
-        config._attn_implementation = attn_implementation
-    return model
 
 
 @dataclass
@@ -310,20 +277,15 @@ class TransformersForCausalLM(nn.Module):
 
 
 class ModelCreator:
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        model_path: str,
-        device: torch.device,
-        pp_info: PPInfo,
-        moe_implementation: str = "fused_quack",
-    ):
+    def __init__(self, config: PretrainedConfig, model_path: str, device: torch.device, pp_info: PPInfo):
         self._pp_info = pp_info
         self._model_path = model_path
         self._config = config
         self._device = device
         with init_on_device_without_buffers("meta"):
-            self._causal_model = _create_causal_model(self._config, moe_implementation)
+            self._causal_model: PreTrainedModel = AutoModelForCausalLM.from_config(
+                self._config,
+            )
         self.model = self._causal_model.model
 
     def create_model(self):
