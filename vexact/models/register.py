@@ -66,6 +66,11 @@ def register_models() -> None:
         apply_deepseek_v3_patches()
         print("[VEXACT] register_models(): DeepSeek-V3 monkey patch active")
 
+        from .gpt_oss.modeling_gpt_oss import apply_gpt_oss_patches
+
+        apply_gpt_oss_patches()
+        print("[VEXACT] register_models(): GPT-OSS fused_quack monkey patch active")
+
     use_liger_patch = os.getenv("VEXACT_LIGER_PATCH", "0") == "1"
     if use_liger_patch:
         # This path mimics VeOmni Qwen3 GPU patch to use Liger kernels

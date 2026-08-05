@@ -100,6 +100,10 @@ class ModelConfig:
         default="fa-invariant",
         metadata={"help": "Attention implementation to use (fa-invariant, fa-invariant-cute, triton-invariant, flex)."},
     )
+    moe_implementation: str = field(
+        default="fused_quack",
+        metadata={"help": "MoE experts implementation. GPT-OSS supports fused_quack only."},
+    )
     enable_batch_invariant: bool = field(
         default=True,
         metadata={"help": "Enable batch invariant operations for deterministic inference."},
@@ -142,6 +146,16 @@ class ModelConfig:
         # Load HuggingFace config from model_path
         if self.hf_config is None:
             self._load_hf_config()
+
+        if getattr(self.hf_config, "model_type", None) == "gpt_oss":
+            if self.attn_impl != "fa-invariant-cute":
+                raise ValueError(
+                    f"GPT-OSS learnable attention sinks require attn_impl='fa-invariant-cute'; got {self.attn_impl!r}"
+                )
+            if self.moe_implementation != "fused_quack":
+                raise ValueError(
+                    f"GPT-OSS requires moe_implementation='fused_quack' (SM90+); got {self.moe_implementation!r}"
+                )
 
         # Initialize max_model_len
         self._initialize_max_model_len()

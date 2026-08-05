@@ -93,6 +93,7 @@ RAY_DEDUP_LOGS=1 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.max_num_batched_tokens=4096 \
     ++actor_rollout_ref.rollout.engine_kwargs.vexact.max_cache_blocks=$vexact_max_cache_blocks \
     ++actor_rollout_ref.rollout.engine_kwargs.vexact.attn_impl=$INFER_FA_IMPL \
+    ++actor_rollout_ref.rollout.engine_kwargs.vexact.moe_implementation=$moe_implementation \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.disable_log_stats=False \
     actor_rollout_ref.rollout.free_cache_engine=True \
