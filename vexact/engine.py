@@ -83,6 +83,17 @@ class VeXact:
         """
         return self.driver_client.wake_up(tag=tag)
 
+    def get_prefix_cache_stats(self) -> dict:
+        """Snapshot of prefix-cache counters since the driver started (or last
+        weight update / sleep, which resets the counters).
+
+        Returns a dict with: prefix_cache_enabled, hit_tokens, miss_tokens,
+        hit_ratio, cached_blocks, free_blocks. Returns
+        {"prefix_cache_enabled": False} on PP>1 (the prefix cache is disabled
+        in that configuration).
+        """
+        return self.driver_client.get_prefix_cache_stats()
+
     async def generate(
         self,
         request: DriverRequest,

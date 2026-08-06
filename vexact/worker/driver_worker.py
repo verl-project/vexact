@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import os
 import time
 
 from vexact.batch_invariant_ops.kv_cache_context import KVCacheManager
@@ -30,7 +31,16 @@ class DriverWorker(Worker):
 
     def __init__(self, config: VeXactConfig):
         super().__init__(config, rank=0)  # CUDA graph capture happens here
-        self.kv_cache_manager = KVCacheManager(config.cache)
+        # Prefix cache only on pp_size==1 — coordinating per-block hash state
+        # across PP ranks (and ensuring KV slots agree on every rank) is out of
+        # scope for now. With it disabled, KVCacheManager behaves like the
+        # original allocator (always-fresh blocks, no lookups).
+        # VEXACT_DISABLE_PREFIX_CACHE=1 is a debug escape hatch — useful for
+        # measuring the cache's contribution by running the same workload twice.
+        enable_prefix_cache = (
+            config.parallel.pipeline_parallel_size == 1 and os.environ.get("VEXACT_DISABLE_PREFIX_CACHE", "") != "1"
+        )
+        self.kv_cache_manager = KVCacheManager(config.cache, enable_prefix_cache=enable_prefix_cache)
         self.scheduler = Scheduler(
             config=config.scheduler,
             kv_cache_manager=self.kv_cache_manager,
@@ -44,6 +54,51 @@ class DriverWorker(Worker):
     def poll_results(self, timeout: float = None) -> list[InferenceRequest]:
         """Get next batch of finished requests (blocking with optional timeout)."""
         return self.scheduler.poll_results(timeout=timeout)
+
+    def receive_weights(self):
+        """Receive new model weights.
+
+        Drops the prefix cache index so future requests can't hit KV computed
+        under the old weights. Assumes the caller (e.g. verl) has already
+        drained all in-flight requests — we don't preempt anything here.
+        """
+        self.kv_cache_manager.clear_cache_index()
+        super().receive_weights()
+
+    def sleep(self, tag: str = None):
+        """Pause memory-saving regions.
+
+        The KV cache region is allocated with enable_cpu_backup=False, so its
+        bytes are dropped on sleep. The prefix cache index is dropped so the
+        post-wake_up engine can't hit blocks whose bytes are gone. Caller is
+        expected to have drained in-flight requests first.
+        """
+        self.kv_cache_manager.clear_cache_index()
+        super().sleep(tag=tag)
+
+    def load_state_dict(self, state_dict):
+        """In-process weight load (e.g. tests). Same staleness as receive_weights()."""
+        self.kv_cache_manager.clear_cache_index()
+        super().load_state_dict(state_dict)
+
+    def get_prefix_cache_stats(self) -> dict:
+        """Snapshot prefix-cache counters since process start (lifetime).
+
+        hit_tokens / miss_tokens are summed across every activated request; the
+        ratio is hit_tokens / (hit_tokens + miss_tokens), guarded against div0.
+        Counters are never reset, so the ratio is a stable lifetime trend line.
+        """
+        hit = self.scheduler.cache_hit_tokens_total
+        miss = self.scheduler.cache_miss_tokens_total
+        total = hit + miss
+        return {
+            "prefix_cache_enabled": self.kv_cache_manager.prefix_cache_enabled,
+            "hit_tokens": hit,
+            "miss_tokens": miss,
+            "hit_ratio": (hit / total) if total > 0 else 0.0,
+            "cached_blocks": self.kv_cache_manager.num_cached_blocks(),
+            "free_blocks": self.kv_cache_manager.num_free_blocks(),
+        }
 
     def _generation_loop(self):
         """Main continuous generation loop."""

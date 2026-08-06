@@ -53,7 +53,7 @@ class WorkerProxy(ProxyBase):
         self.control_server = ControlChannelServer(
             address=config.driver.control_addresses[rank],
             target=self.worker,
-            allowed_methods=["sleep", "wake_up", "receive_weights"],
+            allowed_methods=["sleep", "wake_up", "receive_weights", "get_prefix_cache_stats"],
         )
 
     def start(self):
@@ -82,7 +82,7 @@ class DriverWorkerProxy(ProxyBase):
         self.control_server = ControlChannelServer(
             address=config.driver.control_addresses[rank],
             target=self.worker,
-            allowed_methods=["sleep", "wake_up", "receive_weights"],
+            allowed_methods=["sleep", "wake_up", "receive_weights", "get_prefix_cache_stats"],
         )
 
     def start(self):
