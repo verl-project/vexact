@@ -7,6 +7,7 @@
 
 import contextlib
 import os
+import sys
 from collections import namedtuple
 from collections.abc import Callable
 from typing import Any
@@ -738,9 +739,46 @@ def is_batch_invariant_mode_enabled():
     return _batch_invariant_MODE
 
 
+# verl's ``FusedLinearForPPO`` (verl-project/verl#7461) routes the fused output head
+# through Liger's ``LigerFusedLinearScaledCrossEntropyFunction`` whenever ``liger_kernel``
+# is importable. That kernel bypasses the ``aten::mm`` override below, so the training-side
+# log-probs no longer match vexact's inference log-probs bit-for-bit. While batch-invariant
+# mode is on we null verl's module-level dispatch handle, which sends ``FusedLinearForPPO``
+# back to its chunked ``torch.matmul`` + cross-entropy path (the one the overrides cover),
+# and restore it when the mode is turned off.
+_VERL_TORCH_FUNCTIONAL_MODULE = "verl.utils.experimental.torch_functional"
+_VERL_LIGER_DISPATCH_ATTR = "_LIGER_FUSED_LINEAR_SCALED_CROSS_ENTROPY"
+# (module, original dispatch handle) while the hook is applied, else None.
+_verl_liger_dispatch_backup: tuple[Any, Any] | None = None
+
+
+def _disable_verl_liger_fused_linear() -> None:
+    """Null verl's Liger dispatch handle if verl's fused-linear module is loaded."""
+    global _verl_liger_dispatch_backup
+    if _verl_liger_dispatch_backup is not None:
+        return
+    module = sys.modules.get(_VERL_TORCH_FUNCTIONAL_MODULE)
+    if module is None or not hasattr(module, _VERL_LIGER_DISPATCH_ATTR):
+        return
+    _verl_liger_dispatch_backup = (module, getattr(module, _VERL_LIGER_DISPATCH_ATTR))
+    setattr(module, _VERL_LIGER_DISPATCH_ATTR, None)
+
+
+def _restore_verl_liger_fused_linear() -> None:
+    """Undo :func:`_disable_verl_liger_fused_linear`."""
+    global _verl_liger_dispatch_backup
+    if _verl_liger_dispatch_backup is None:
+        return
+    module, original = _verl_liger_dispatch_backup
+    setattr(module, _VERL_LIGER_DISPATCH_ATTR, original)
+    _verl_liger_dispatch_backup = None
+
+
 def enable_batch_invariant_mode():
     global _batch_invariant_MODE, _batch_invariant_LIB
     if _batch_invariant_MODE:
+        # verl's module may have been imported after the mode was enabled; re-apply the hook.
+        _disable_verl_liger_fused_linear()
         return
 
     dispatch_key = getattr(torch.accelerator.current_accelerator(), "type", "cpu").upper()
@@ -757,6 +795,7 @@ def enable_batch_invariant_mode():
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
     torch.use_deterministic_algorithms(True, warn_only=False)
     torch.backends.cudnn.deterministic = True
+    _disable_verl_liger_fused_linear()
 
 
 def disable_batch_invariant_mode():
@@ -765,6 +804,7 @@ def disable_batch_invariant_mode():
         _batch_invariant_LIB._destroy()
     _batch_invariant_MODE = False
     _batch_invariant_LIB = None
+    _restore_verl_liger_fused_linear()
 
 
 @contextlib.contextmanager
@@ -779,6 +819,10 @@ def set_batch_invariant_mode(enabled: bool = True):
     if _batch_invariant_LIB is not None:
         _batch_invariant_LIB._destroy()
     _batch_invariant_MODE, _batch_invariant_LIB = old_data
+    if _batch_invariant_MODE:
+        _disable_verl_liger_fused_linear()
+    else:
+        _restore_verl_liger_fused_linear()
 
 
 AttentionBlockSize = namedtuple("AttentionBlockSize", ["block_m", "block_n"])

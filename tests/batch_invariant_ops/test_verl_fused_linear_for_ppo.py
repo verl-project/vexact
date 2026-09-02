@@ -17,6 +17,7 @@
 import pytest
 import torch
 
+import verl.utils.experimental.torch_functional as verl_torch_functional
 from verl.utils.experimental.torch_functional import FusedLinearForPPO
 from verl.utils.torch_functional import logprobs_from_logits
 from vexact.batch_invariant_ops import set_batch_invariant_mode
@@ -132,3 +133,24 @@ def test_fused_linear_for_ppo_log_probs_float32_in_bfloat16_model(
         rtol=0,
         atol=0,
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="FusedLinearForPPO requires CUDA")
+@pytest.mark.skipif(
+    not hasattr(verl_torch_functional, "_LIGER_FUSED_LINEAR_SCALED_CROSS_ENTROPY"),
+    reason="this verl has no Liger dispatch for FusedLinearForPPO",
+)
+def test_batch_invariant_mode_disables_verl_liger_dispatch() -> None:
+    """
+    checks that batch-invariant mode sends verl FusedLinearForPPO down its chunked
+    torch.matmul path (Liger dispatch nulled) and restores the dispatch afterwards
+    """
+    original = verl_torch_functional._LIGER_FUSED_LINEAR_SCALED_CROSS_ENTROPY
+
+    with set_batch_invariant_mode(True):
+        assert verl_torch_functional._LIGER_FUSED_LINEAR_SCALED_CROSS_ENTROPY is None
+        with set_batch_invariant_mode(False):
+            assert verl_torch_functional._LIGER_FUSED_LINEAR_SCALED_CROSS_ENTROPY is original
+        assert verl_torch_functional._LIGER_FUSED_LINEAR_SCALED_CROSS_ENTROPY is None
+
+    assert verl_torch_functional._LIGER_FUSED_LINEAR_SCALED_CROSS_ENTROPY is original
