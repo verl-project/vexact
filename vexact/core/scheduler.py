@@ -71,6 +71,11 @@ class Scheduler:
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.total_requests = 0
         self._kv_cache_manager = kv_cache_manager
+        # Lifetime prefix-cache stats. Never reset — get_prefix_cache_stats reports
+        # the cumulative hit ratio since engine start, which gives a stable trend
+        # line across weight updates rather than a jittery per-step ratio.
+        self.cache_hit_tokens_total = 0
+        self.cache_miss_tokens_total = 0
 
         self._request_queue: queue.Queue[InferenceRequest] = queue.Queue(maxsize=config.max_queue_size)
 
@@ -155,9 +160,25 @@ class Scheduler:
                 break
 
             try:
-                tokens, next_num_comp = self._plan_tokens_for_request(request, available_token_budget)
+                # Hashes are deterministic per token sequence — cache them on the
+                # request so a requeued request (budget-rejected this round) doesn't
+                # re-hash next round. Only `count_prefix_hits` (a few dict lookups)
+                # has to re-run, since the cache index may have changed.
+                if not request.prefix_block_hashes:
+                    request.prefix_block_hashes = self._kv_cache_manager.compute_block_hashes(
+                        request.input_ids_list
+                    )
+                num_prefix_hit_blocks = self._kv_cache_manager.count_prefix_hits(
+                    request.prefix_block_hashes
+                )
+                cached_tokens = num_prefix_hit_blocks * self._kv_cache_manager.page_size
+                # Pass num_comp explicitly so we don't mutate the request before
+                # we know it'll be activated.
+                tokens, next_num_comp = self._plan_tokens_for_request(
+                    request, available_token_budget, num_comp=cached_tokens
+                )
                 if available_token_budget >= tokens:
-                    self._activate_request(request)
+                    self._activate_request(request, request.prefix_block_hashes, num_prefix_hit_blocks)
 
                     # Set scheduling fields and add to the active batch
                     available_token_budget -= tokens
@@ -168,6 +189,7 @@ class Scheduler:
                     # be fit in
                     seqs_budget -= 1
                 else:
+                    # No mutation happened; just put back and stop.
                     self._request_queue.put(request)
                     break
             except RuntimeError as e:
@@ -190,8 +212,17 @@ class Scheduler:
 
         return SchedulerOutput(batch_to_infer=batch_to_infer, batch_to_update=batch_to_update)
 
-    def _plan_tokens_for_request(self, request: InferenceRequest, available_token_budget: int):
-        num_comp = request.num_computed_tokens
+    def _plan_tokens_for_request(
+        self,
+        request: InferenceRequest,
+        available_token_budget: int,
+        num_comp: int | None = None,
+    ):
+        # Allow caller to pass a prospective num_computed_tokens (e.g. the
+        # prefix-cache hit count for an about-to-be-activated request) without
+        # mutating request state ahead of the commit.
+        if num_comp is None:
+            num_comp = request.num_computed_tokens
         input_len = len(request.input_ids_list)
         prefill_remaining = max(0, input_len - num_comp)
 
@@ -223,6 +254,11 @@ class Scheduler:
             if request.num_computed_tokens < len(request.input_ids_list):
                 continue
 
+            # Prefill done. Stamp full blocks so concurrent / future requests with
+            # the same prefix can hit the cache. `mark_blocks_filled` is idempotent
+            # (O(1) fast-path on repeat calls), so we don't track a flag here.
+            self._kv_cache_manager.mark_blocks_filled(request.block_ids, request.prefix_block_hashes)
+
             token_id = self._process_generated_token(request, token_tensor, logits, logprobs)
 
             if request.should_finish(token_id):
@@ -234,21 +270,44 @@ class Scheduler:
             # cuz we don't need to do streaming the partial states for now
             self._result_queue.put(finished_requests)
 
-    def _activate_request(self, request: InferenceRequest) -> None:
-        """Activate a request for processing: allocate resources incrementally.
+    def _activate_request(
+        self,
+        request: InferenceRequest,
+        block_hashes: list[int],
+        num_prefix_hit_blocks: int,
+    ) -> None:
+        """Activate a request: commit the prefix-cache plan, attach hashes, bump
+        num_computed_tokens past any cached prefix so prefill skips it.
 
-        Only allocates blocks for the current input_ids_list length (prompt for new requests,
-        prompt+generated for re-activated preempted requests), not the full max_length.
+        The plan (block_hashes + num_prefix_hit_blocks) comes from the two-step
+        `compute_block_hashes` + `count_prefix_hits` pattern in schedule();
+        we never recompute hashes here. With prefix cache disabled (pp_size > 1),
+        block_hashes is empty and every block is a fresh allocation — same behaviour
+        as the original allocator.
         """
-        new_blocks = self._kv_cache_manager.allocate_blocks(len(request.input_ids_list))
-        if new_blocks is None:
+        block_ids = self._kv_cache_manager.commit_prefix_plan(
+            block_hashes, num_prefix_hit_blocks, len(request.input_ids_list)
+        )
+        if block_ids is None:
             raise RuntimeError(
                 f"Not enough free blocks to activate request {request.request_id}: "
                 f"need coverage for {len(request.input_ids_list)} tokens"
             )
-        request.block_ids.extend(new_blocks)
+        num_cached_tokens = num_prefix_hit_blocks * self._kv_cache_manager.page_size
+        request.block_ids = block_ids
+        request.prefix_block_hashes = block_hashes
+        request.num_computed_tokens = num_cached_tokens
         request.activate()
         self._active_requests[request.request_id] = request
+        self.cache_hit_tokens_total += num_cached_tokens
+        self.cache_miss_tokens_total += max(0, len(request.input_ids_list) - num_cached_tokens)
+        if num_cached_tokens > 0:
+            logger.debug(
+                "[Scheduler] %s: prefix cache hit %d/%d tokens",
+                request.request_id,
+                num_cached_tokens,
+                len(request.input_ids_list),
+            )
 
     def _extend_or_preempt(self, request: InferenceRequest) -> bool:
         """Try to extend KV cache blocks for request's planned tokens. If OOM, preempt least-progress request.
