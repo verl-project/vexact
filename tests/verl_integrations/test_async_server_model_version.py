@@ -20,7 +20,8 @@ import pytest
 
 pytest.importorskip("verl")
 
-from vexact.integrations.verl.async_server import VeXactServer  # noqa: E402
+from verl.checkpoint_engine.base import CheckpointEngineManager  # noqa: E402
+from vexact.integrations.verl.async_server import VeXactReplica, VeXactServer  # noqa: E402
 from vexact.integrations.verl.rollout import ServerAdapter  # noqa: E402
 
 
@@ -75,6 +76,31 @@ async def test_unversioned_weight_update_clears_previous_model_version():
     await server.receive_weights()
 
     assert server.global_steps is None
+
+
+@pytest.mark.asyncio
+async def test_abort_accepts_current_verl_checkpoint_keyword():
+    server = VeXactServer.__new__(VeXactServer)
+    remote_abort = AsyncMock(side_effect=server.abort_all_requests)
+    replica = VeXactReplica.__new__(VeXactReplica)
+    replica.servers = [SimpleNamespace(abort_all_requests=SimpleNamespace(remote=remote_abort))]
+
+    manager = CheckpointEngineManager.__new__(CheckpointEngineManager)
+    manager.replicas = [replica]
+    await manager.abort_replicas(reject_request=False)
+
+    remote_abort.assert_awaited_once_with(reject_request=False)
+
+
+@pytest.mark.asyncio
+async def test_abort_does_not_silently_ignore_request_rejection():
+    server = VeXactServer.__new__(VeXactServer)
+    remote_abort = AsyncMock(side_effect=server.abort_all_requests)
+    replica = VeXactReplica.__new__(VeXactReplica)
+    replica.servers = [SimpleNamespace(abort_all_requests=SimpleNamespace(remote=remote_abort))]
+
+    with pytest.raises(NotImplementedError, match="rejecting incoming generation requests"):
+        await replica.abort_all_requests(reject_request=True)
 
 
 class _RemoteMethod:

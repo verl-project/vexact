@@ -36,18 +36,18 @@ verl = [
     "verl",
     # VeRL's v1 trainer imports TransferQueue unconditionally, but the
     # upstream package does not currently declare it as a dependency.
-    "TransferQueue==0.1.9",
+    "TransferQueue==0.1.10",
     "uvicorn",
     "fastapi",
     "cachetools",
 ]
 veomni = [
     "veomni",
-    # VeOmni's default install pins transformers==5.9.0 (via its
+    # VeOmni's default install pins transformers==5.16.1 (via its
     # `transformers-stable` dependency group). Mirror that pin here so vexact
     # users picking up the veomni extra resolve to the same version VeOmni
     # tests/develops against.
-    "transformers==5.9.0",
+    "transformers==5.16.1",
 ]
 
 [build-system]
@@ -133,10 +133,10 @@ known-third-party = [
 ]
 
 [tool.uv.sources]
-verl = { git = "https://github.com/verl-project/verl.git", rev = "e9618406de5bad40041d7612554e465ec2003ec1" }
+verl = { git = "https://github.com/verl-project/verl.git", rev = "8718ca30a3f002f93b7c4fd99b9b2506718681bc" }
 # To work on verl locally, point this at `{ path = "./verl", editable = true }`.
 # To work on VeOmni locally, point this at `{ path = "./VeOmni", editable = true }`.
-veomni = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "9651e80750a7d204d69423d71063c2987b03bf08" }
+veomni = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "aa8bb43c6ba457afde4b9bd35cceaf74823604cc" }
 torch = [
     { index = "pytorch", extra = "gpu" },
 ]
@@ -162,5 +162,5 @@ environments = ["sys_platform == 'linux'"]
 override-dependencies = [
     "opencv-python-headless<4.13.0",
     # Keep the vllm and veomni extras on the same Transformers version.
-    "transformers==5.9.0",
+    "transformers==5.16.1",
 ]
