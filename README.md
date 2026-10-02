@@ -76,6 +76,11 @@ Extras: `gpu` (PyTorch + FlashAttention + kernels), `verl` and `veomni`
 `[tool.uv.sources]` block; to develop against a local checkout, set
 `editable = true` there (inline hints included).
 
+VeOmni integration requires its current `init_parallel_state_from_config` API;
+the legacy `init_parallel_state` API is not supported. Standalone rollout
+workers derive their non-EP topology from the initialized process group,
+even when they inherit a different `WORLD_SIZE` from the trainer.
+
 ## Components
 
 - [`vexact/batch_invariant_ops/`](vexact/batch_invariant_ops/README.md) — batch-invariant operators/kernels for true on-policy RL training.

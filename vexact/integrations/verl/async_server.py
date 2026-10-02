@@ -319,8 +319,10 @@ class VeXactServer:
         """Wait for all pending requests to complete. VeXact processes requests synchronously."""
         pass
 
-    async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:  # noqa: ARG002
-        """Abort all ongoing generation requests."""
+    async def abort_all_requests(self, reset_prefix_cache: bool = True, reject_request: bool = False) -> dict[str, Any]:  # noqa: ARG002
+        """Keep the existing no-op abort behavior; reject unsupported admission blocking."""
+        if reject_request:
+            raise NotImplementedError("VeXact does not support rejecting incoming generation requests")
         return {"aborted_count": 0, "request_ids": []}
 
     async def resume_generation(self):
@@ -441,9 +443,11 @@ class VeXactReplica(RolloutReplica):
         await self.servers[0].wait_for_requests_to_drain.remote()
         await asyncio.gather(*[server.sleep.remote() for server in self.servers])
 
-    async def abort_all_requests(self) -> dict[str, Any]:
+    async def abort_all_requests(self, reject_request: bool = False) -> dict[str, Any]:
         """Abort all ongoing generation requests across all servers."""
-        results = await asyncio.gather(*[server.abort_all_requests.remote() for server in self.servers])
+        results = await asyncio.gather(
+            *[server.abort_all_requests.remote(reject_request=reject_request) for server in self.servers]
+        )
 
         total_aborted = sum(r.get("aborted_count", 0) for r in results)
         all_request_ids = []

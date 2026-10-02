@@ -26,6 +26,7 @@ from vexact.inferencer.inferencer import Inferencer
 from vexact.inferencer.model_loader import ModelCreator, load_weights_from_weight_iterator
 from vexact.utils.profiler import ProfilerManager
 from vexact.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
+from vexact.utils.veomni_parallel_state import init_veomni_parallel_state
 
 
 logger = logging.getLogger(__name__)
@@ -118,11 +119,8 @@ class Worker(WorkerBase):
         # (e.g. our PP>1 rollout). Bind a non-EP parallel state up front so
         # subsequent MoE forwards take the cheap non-EP path; we never run
         # expert parallelism inside the rollout worker. The helper is
-        # idempotent (warns + early-return when state already exists).
-        if torch.distributed.is_initialized():
-            from veomni.distributed.parallel_state import init_parallel_state
-
-            init_parallel_state(dp_size=torch.distributed.get_world_size())
+        # idempotent (reuses a matching VeOmni topology).
+        init_veomni_parallel_state()
 
         self.inferencer = Inferencer(
             model=self.model,
