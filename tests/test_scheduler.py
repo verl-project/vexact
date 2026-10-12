@@ -261,20 +261,24 @@ def test_scheduler_update_processes_outputs_and_finishes_requests(kv_cache_manag
             generation_config=generation_config,
             generated_tokens=[],
             input_ids_list=[234, 1897],
-            num_computed_tokens=2,
         ),
         InferenceRequest(
             request_id="req02",
             generation_config=generation_config,
             generated_tokens=[],
             input_ids_list=[15287, 344, 765],
-            num_computed_tokens=3,
         ),
     ]
 
     # Prepare requests by allocating KV cache and setting up state
     for request in infer_requests:
-        scheduler._activate_request(request)
+        block_hashes = scheduler._kv_cache_manager.compute_block_hashes(request.input_ids_list)
+        num_prefix_hit_blocks = scheduler._kv_cache_manager.count_prefix_hits(block_hashes)
+        scheduler._activate_request(request, block_hashes, num_prefix_hit_blocks)
+        # Simulate that prefill is already complete so update() takes the decode path.
+        # _activate_request sets num_computed_tokens to the cache-derived value (0
+        # in this test); we want it at input_len for this unit test of update().
+        request.num_computed_tokens = len(request.input_ids_list)
 
     # Set generated tokens after prepare (which resets them)
     infer_requests[1].generated_tokens = [78, 22]
@@ -449,7 +453,9 @@ def test_scheduler_preempted_request_folds_back_generated_tokens(kv_cache_manage
     req = InferenceRequest(request_id="req-preempt", generation_config=gen_config, input_ids_list=[10, 20, 30])
 
     # Set up request as if it had been running and generated 2 tokens
-    scheduler._activate_request(req)
+    block_hashes = scheduler._kv_cache_manager.compute_block_hashes(req.input_ids_list)
+    num_prefix_hit_blocks = scheduler._kv_cache_manager.count_prefix_hits(block_hashes)
+    scheduler._activate_request(req, block_hashes, num_prefix_hit_blocks)
     req.generated_tokens = [40, 50]
     req.generated_logprobs = [0.1, 0.2]
     req.num_computed_tokens = 5
