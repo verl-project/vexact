@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import torch
+import triton
+import triton.language as tl
 import triton.profiler as proton
 from torch import Tensor
 from transformers import GenerationConfig
@@ -24,6 +26,32 @@ try:
 except ImportError:
     vllm_apply_top_k_top_p = None
     vllm_gumbel_sample = None
+
+
+@triton.jit
+def _unsort_rows_kernel(src, idx, out, V, BLOCK: tl.constexpr):
+    row = tl.program_id(0).to(tl.int64)
+    offs = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    m = offs < V
+    dst = tl.load(idx + row * V + offs, mask=m, other=0)
+    tl.store(out + row * V + dst, tl.load(src + row * V + offs, mask=m), mask=m)
+
+
+def _unsort_rows(src: Tensor, idx: Tensor) -> Tensor:
+    """out[r, idx[r, j]] = src[r, j], i.e. `src.scatter(-1, idx, src)` for a per-row permutation `idx`.
+
+    Each output element has exactly one writer, so plain stores are exact. Under
+    `torch.use_deterministic_algorithms` torch routes `scatter` through a sorted `index_put`, which
+    costs about 18 ms for 512 x 151,936 logits on H100; this kernel takes a fraction of a millisecond.
+    """
+    if not src.is_cuda:
+        return src.scatter(dim=-1, index=idx, src=src)
+    src, idx = src.contiguous(), idx.contiguous()
+    out = torch.empty_like(src)
+    rows, V = src.shape
+    BLOCK = 4096
+    _unsort_rows_kernel[(rows, triton.cdiv(V, BLOCK))](src, idx, out, V, BLOCK=BLOCK)
+    return out
 
 
 class Sampler:
@@ -65,8 +93,13 @@ class Sampler:
                     raise ImportError("vLLM is required for seeded sampling but is not importable.")
             if k is not None:
                 k = torch.full((batched_logits.shape[0],), int(k), device=batched_logits.device)
-            if p is not None:
-                p = torch.full((batched_logits.shape[0],), float(p), device=batched_logits.device)
+            # top_p >= 1 keeps every token, so skip the full-vocab sort. The sort path would only mask
+            # tokens whose sorted-softmax probability is exactly 0, which can't be sampled anyway.
+            p = (
+                torch.full((batched_logits.shape[0],), float(p), device=batched_logits.device)
+                if float(p) < 1.0
+                else None
+            )
             # apply temperature
             if temp != 1.0:
                 batched_logits.div_(temp)
@@ -180,9 +213,7 @@ class Sampler:
             logits_sort.masked_fill_(top_p_mask, -float("inf"))
 
         # Re-sort the probabilities.
-        logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
-
-        return logits
+        return _unsort_rows(logits_sort, logits_idx)
 
     @proton.cpu_timed_scope("apply_top_k_only")
     @torch.inference_mode()

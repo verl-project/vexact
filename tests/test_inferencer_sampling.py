@@ -65,7 +65,7 @@ def _batch_sample_token_ref(
 @pytest.mark.parametrize("batch_size", [1, 2048, 4096])
 @pytest.mark.parametrize("vocab_size", [151936])
 @pytest.mark.parametrize("top_k", [0, 50, None])
-@pytest.mark.parametrize("top_p", [0, 0.9])
+@pytest.mark.parametrize("top_p", [0, 0.9, 1.0])
 def test_batch_sample_token_matches_sample_token_for_loop(batch_size, vocab_size, top_k, top_p):
     sampler = Sampler()
     device = torch.device("cuda:0")
@@ -83,6 +83,15 @@ def test_batch_sample_token_matches_sample_token_for_loop(batch_size, vocab_size
     batch_tokens = sampler.batch_sample_token(logits.clone(), gen_configs)
 
     torch.testing.assert_close(batch_tokens, ref_tokens, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton unsort requires CUDA.")
+@pytest.mark.parametrize("batch_size, vocab_size", [(1, 7), (3, 4096), (64, 151936)])
+def test_unsort_rows_matches_scatter(batch_size, vocab_size):
+    src = torch.randn(batch_size, vocab_size, device="cuda")
+    idx = torch.argsort(torch.rand(batch_size, vocab_size, device="cuda"), dim=-1)
+    ref = src.scatter(dim=-1, index=idx, src=src)
+    torch.testing.assert_close(sampler_module._unsort_rows(src, idx), ref, rtol=0, atol=0)
 
 
 def test_seeded_batch_sample_token_rejects_mixed_seed_batch():
