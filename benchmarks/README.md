@@ -184,6 +184,11 @@ tile and any split-K per call:
     since Triton folds `.to(bf16).to(fp32)` in front of an add (6% of RoPE outputs changed). Row
     lengths are limited to multiples of 1024 or a single power-of-two block. +17–28% end to end on
     top of the earlier changes.
+- **Async scheduling** (`SchedulerConfig.async_scheduling`, off by default). The generation thread
+    blocked on each step's `.cpu()` of sampled tokens, then built the next step while the GPU idled
+    (GPU busy 84% of wall time). Step N+1 now launches before step N's tokens reach the host, with
+    decode inputs copied on the GPU. Batch composition changes but, by batch invariance, no token does.
+    1.21× on a 4096-request MoE rollout.
 
 ## Acknowledgements
 

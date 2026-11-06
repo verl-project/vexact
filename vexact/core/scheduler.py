@@ -17,6 +17,7 @@ import queue
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from itertools import zip_longest
+from typing import Optional
 
 from vexact.batch_invariant_ops.kv_cache_context import KVCacheManager
 from vexact.config import PPInfo, SchedulerConfig
@@ -83,6 +84,9 @@ class Scheduler:
         self._current_batch_idx = 0
 
         self._result_queue: queue.Queue[InferenceRequest] = queue.Queue()
+        # Async scheduling: requests finished at step N are delivered only after step N + 1 (which may still
+        # include them) has completed, so no in-flight GPU work references them when a client acts on results.
+        self._deferred_results: list[InferenceRequest] = []
         self._enable_chunked_prefill = config.enable_chunked_prefill
 
     @property
@@ -208,31 +212,61 @@ class Scheduler:
 
         return tokens, next_num_comp
 
-    def update(self, requests: list[InferenceRequest], infer_result: InferencerOutput):
-        """Process inference outputs and finalize completed requests."""
+    def update(
+        self,
+        requests: list[InferenceRequest],
+        infer_result: InferencerOutput,
+        launch_preempt_counts: Optional[list[int]] = None,
+        launch_num_computed: Optional[list[int]] = None,
+    ):
+        """Process inference outputs and finalize completed requests.
+
+        With async scheduling the next step has already been scheduled when this runs, so the per-request
+        ``preempt_count`` and ``num_computed_tokens`` captured at launch are passed in: outputs of requests that
+        were preempted since launch are dropped, and the finish check uses the launch-time token count.
+        """
         finished_requests = []
+        deferred = launch_preempt_counts is not None
+        if deferred:
+            # Everything finished one step earlier: its extra step is this one, which has completed.
+            self.flush_results()
 
         # Process outputs for each request
         # zip_longest is when output_logits or output_scores is off
-        for request, token_tensor, logits, logprobs in zip_longest(
-            requests, infer_result.token_ids.cpu(), infer_result.logits.cpu(), infer_result.logprobs.cpu()
+        for i, (request, token_tensor, logits, logprobs) in enumerate(
+            zip_longest(requests, infer_result.token_ids.cpu(), infer_result.logits.cpu(), infer_result.logprobs.cpu())
         ):
             if request.is_finished:
                 continue
 
-            if request.num_computed_tokens < len(request.input_ids_list):
+            num_computed = request.num_computed_tokens
+            if launch_preempt_counts is not None:
+                if request.preempt_count != launch_preempt_counts[i]:
+                    continue  # preempted after launch; the token is regenerated after re-prefill
+                num_computed = launch_num_computed[i]
+
+            if num_computed < len(request.input_ids_list):
                 continue
 
             token_id = self._process_generated_token(request, token_tensor, logits, logprobs)
 
-            if request.should_finish(token_id):
+            if request.should_finish(token_id, num_computed):
                 self._finalize_request(request)
                 finished_requests.append(request)
 
         if finished_requests:
-            # currently we only put the finished request state in to the queue
-            # cuz we don't need to do streaming the partial states for now
-            self._result_queue.put(finished_requests)
+            if deferred:
+                self._deferred_results.extend(finished_requests)
+            else:
+                # currently we only put the finished request state in to the queue
+                # cuz we don't need to do streaming the partial states for now
+                self._result_queue.put(finished_requests)
+
+    def flush_results(self) -> None:
+        """Deliver results held back by async scheduling (call when no step is in flight)."""
+        if self._deferred_results:
+            self._result_queue.put(self._deferred_results)
+            self._deferred_results = []
 
     def _activate_request(self, request: InferenceRequest) -> None:
         """Activate a request for processing: allocate resources incrementally.
