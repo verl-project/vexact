@@ -167,6 +167,9 @@ tile and any split-K per call:
     128×128×32 tile. Launching the same kernel with a tile chosen by routed-row count reaches the
     weight-streaming bound at decode: the MoE layer is 1.16–1.45× faster for T ≤ 512 tokens
     (Qwen3-30B-A3B shapes).
+- **`matmul_ogs` for prefill-size expert GEMMs.** Above 2048 routed rows, triton_kernels' ragged
+    `matmul_ogs` (split-K pinned to 1) gives VeOmni's bits at 400–530 TFLOP/s where VeOmni's kernel
+    stays near 200: the MoE layer is 1.30–1.71× faster at T = 2048–8192.
 
 ## Acknowledgements
 
