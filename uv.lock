@@ -3061,6 +3061,15 @@ wheels = [
 ]
 
 [[package]]
+name = "triton-kernels"
+version = "1.0.0"
+source = { git = "https://github.com/triton-lang/triton.git?subdirectory=python%2Ftriton_kernels&tag=v3.6.0#7c56a5e40f7fd928dfd5c72902d5def0097db73a" }
+dependencies = [
+    { name = "numpy", marker = "sys_platform == 'linux'" },
+    { name = "pytest", marker = "sys_platform == 'linux'" },
+]
+
+[[package]]
 name = "typer"
 version = "0.24.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3209,6 +3218,7 @@ gpu = [
     { name = "torch", marker = "sys_platform == 'linux'" },
     { name = "torchaudio", marker = "sys_platform == 'linux'" },
     { name = "torchvision", marker = "sys_platform == 'linux'" },
+    { name = "triton-kernels", marker = "sys_platform == 'linux'" },
 ]
 veomni = [
     { name = "transformers", marker = "sys_platform == 'linux'" },
@@ -3246,6 +3256,7 @@ requires-dist = [
     { name = "transferqueue", marker = "extra == 'verl'", specifier = "==0.1.10" },
     { name = "transformers" },
     { name = "transformers", marker = "extra == 'veomni'", specifier = "==5.16.1" },
+    { name = "triton-kernels", marker = "extra == 'gpu'", git = "https://github.com/triton-lang/triton.git?subdirectory=python%2Ftriton_kernels&tag=v3.6.0" },
     { name = "uvicorn", marker = "extra == 'verl'" },
     { name = "veomni", marker = "extra == 'veomni'", git = "https://github.com/ByteDance-Seed/VeOmni.git?rev=aa8bb43c6ba457afde4b9bd35cceaf74823604cc" },
     { name = "verl", marker = "extra == 'verl'", git = "https://github.com/verl-project/verl.git?rev=8718ca30a3f002f93b7c4fd99b9b2506718681bc" },
