@@ -78,13 +78,54 @@ def _rms_norm_kernel(
         gl.store(o_row + offs, (w * y).to(gl.bfloat16), mask=m)
 
 
+@gluon.jit
+def _rms_norm_rows128_kernel(
+    x_ptr,
+    w_ptr,
+    out_ptr,
+    n_rows,
+    row_stride,
+    N,
+    eps,
+    ROWS: gl.constexpr,
+    NUM_WARPS: gl.constexpr,
+):
+    # For a 128-wide row, mean_kernel's 1024-wide layout puts the whole row in warp 0 (4 contiguous values per
+    # lane); every other lane and warp contributes exact zeros. Its summation is therefore: 4 values per lane in
+    # order, then a 32-lane butterfly. This layout keeps exactly that per row (one warp per row, 4 values per
+    # lane) while packing ROWS rows per program and loading each row once.
+    layout: gl.constexpr = gl.BlockedLayout(
+        size_per_thread=[1, 4], threads_per_warp=[1, 32], warps_per_cta=[NUM_WARPS, 1], order=[1, 0]
+    )
+    rows = gl.program_id(0).to(gl.int64) * ROWS + gl.arange(0, ROWS, layout=gl.SliceLayout(1, layout))
+    cols = gl.arange(0, 128, layout=gl.SliceLayout(0, layout))
+    m = (rows < n_rows)[:, None] & (cols < 128)[None, :]
+    x = gl.load(x_ptr + rows[:, None] * row_stride + cols[None, :], mask=m, other=0.0).to(gl.float32)
+    mean = gl.sum(x * x, axis=1) / N  # mean_kernel: (0.0 + sum) / N, and 0.0 + s == s
+    r = gl.rsqrt(mean + eps)
+    bits = (x * r[:, None]).to(gl.uint32, bitcast=True)  # round to bf16 (nearest even) with integer ops
+    y = ((bits + 0x7FFF + ((bits >> 16) & 1)) & 0xFFFF0000).to(gl.float32, bitcast=True)
+    w = gl.load(w_ptr + cols).to(gl.float32)
+    gl.store(out_ptr + rows[:, None] * 128 + cols[None, :], (w[None, :] * y).to(gl.bfloat16), mask=m)
+
+
+_ROWS128_PER_PROGRAM = 16  # 4 warps x 4 rows each
+
+
 def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     """Bitwise equal to HF eager RMSNorm (bf16 in/out) under vexact batch-invariant mode."""
     n = x.shape[-1]
     x2 = x.reshape(-1, n)
-    out = torch.empty((x2.shape[0], n), dtype=x.dtype, device=x.device)
-    if x2.shape[0]:
-        _rms_norm_kernel[(x2.shape[0],)](
+    rows = x2.shape[0]
+    out = torch.empty((rows, n), dtype=x.dtype, device=x.device)
+    if rows == 0:
+        return out.reshape(x.shape)
+    if n == 128:
+        _rms_norm_rows128_kernel[(triton.cdiv(rows, _ROWS128_PER_PROGRAM),)](
+            x2, weight, out, rows, x2.stride(0), n, eps, ROWS=_ROWS128_PER_PROGRAM, NUM_WARPS=4, num_warps=4
+        )
+    else:
+        _rms_norm_kernel[(rows,)](
             x2, weight, out, x2.stride(0), n, eps, BLOCK=_MEAN_BLOCK, NUM_WARPS=_MEAN_WARPS, num_warps=_MEAN_WARPS
         )
     return out.reshape(x.shape)
@@ -98,7 +139,7 @@ def _round_bf16(x):
 
 
 @triton.jit
-def _rope_kernel(
+def _rope_token_kernel(
     x_ptr,
     cos_ptr,
     sin_ptr,
@@ -107,25 +148,25 @@ def _rope_kernel(
     x_stride_t,
     x_stride_h,
     cs_stride_t,
+    HEADS: tl.constexpr,
     HALF: tl.constexpr,
 ):
-    pid = tl.program_id(0).to(tl.int64)  # one (token, head)
-    t = pid // n_heads
-    h = pid % n_heads
-    d = tl.arange(0, HALF)
-    xb = x_ptr + t * x_stride_t + h * x_stride_h
-    x1 = tl.load(xb + d).to(tl.float32)
-    x2 = tl.load(xb + HALF + d).to(tl.float32)
+    t = tl.program_id(0).to(tl.int64)  # one token, all heads
+    h = tl.arange(0, HEADS)[:, None]
+    d = tl.arange(0, HALF)[None, :]
+    hm = h < n_heads
+    xb = x_ptr + t * x_stride_t + h * x_stride_h + d
+    x1 = tl.load(xb, mask=hm, other=0.0).to(tl.float32)
+    x2 = tl.load(xb + HALF, mask=hm, other=0.0).to(tl.float32)
     c1 = tl.load(cos_ptr + t * cs_stride_t + d).to(tl.float32)
     c2 = tl.load(cos_ptr + t * cs_stride_t + HALF + d).to(tl.float32)
     s1 = tl.load(sin_ptr + t * cs_stride_t + d).to(tl.float32)
     s2 = tl.load(sin_ptr + t * cs_stride_t + HALF + d).to(tl.float32)
-    # rotate_half(x) = cat(-x2, x1); every product and the sum are rounded to bf16 as in eager
     o1 = _round_bf16(x1 * c1) + _round_bf16(-x2 * s1)
     o2 = _round_bf16(x2 * c2) + _round_bf16(x1 * s2)
-    ob = out_ptr + pid * 2 * HALF
-    tl.store(ob + d, o1.to(tl.bfloat16))
-    tl.store(ob + HALF + d, o2.to(tl.bfloat16))
+    ob = out_ptr + (t * n_heads + h) * 2 * HALF + d
+    tl.store(ob, o1.to(tl.bfloat16), mask=hm)
+    tl.store(ob + HALF, o2.to(tl.bfloat16), mask=hm)
 
 
 def rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
@@ -134,7 +175,20 @@ def rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     t, h, d = x.shape
     out = torch.empty((t, h, d), dtype=x.dtype, device=x.device)
     if t * h:
-        _rope_kernel[(t * h,)](x, cos, sin, out, h, x.stride(0), x.stride(1), cos.stride(0), HALF=d // 2, num_warps=1)
+        heads = triton.next_power_of_2(h)
+        _rope_token_kernel[(t,)](
+            x,
+            cos,
+            sin,
+            out,
+            h,
+            x.stride(0),
+            x.stride(1),
+            cos.stride(0),
+            HEADS=heads,
+            HALF=d // 2,
+            num_warps=4 if heads * d >= 2048 else 2,
+        )
     return out
 
 
