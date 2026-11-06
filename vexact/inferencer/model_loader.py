@@ -26,6 +26,7 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME, WEIGH
 from transformers.utils.hub import cached_file, get_checkpoint_shard_files
 
 from vexact.config import PPInfo
+from vexact.models.fused_projections import fuse_projections
 from vexact.models.register import register_models as _register_models
 from vexact.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 
@@ -306,6 +307,9 @@ class ModelCreator:
         # state_dict naming evolves across transformers releases).
         with TorchMemorySaverAdapter.get_instance().region("weights", enable_cpu_backup=True):
             init_parameters(self._causal_model, self._config.dtype, self._device)
+            # One weight per q/k/v and gate/up group, inside the weights region; loading fills it in place.
+            fused = fuse_projections(self._causal_model)
+            logger.info(f"[VEXACT] fused q/k/v and gate/up weights of {fused} modules")
 
         load_weights_from_weight_path(self._causal_model, self._config, self._model_path)
 
