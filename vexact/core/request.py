@@ -63,6 +63,10 @@ class InferenceRequest:
     # Tracks original prompt length for correct token folding on repeated preemptions
     _original_prompt_len: int = 0
 
+    # Incremented on every preemption. With async scheduling, outputs of a step that was launched before a
+    # preemption are dropped (the token is regenerated identically after re-prefill).
+    preempt_count: int = 0
+
     # Timer  # TODO: clean up
     start_generation_time: float = 0.0
     processing_time: float = 0.0
@@ -101,15 +105,20 @@ class InferenceRequest:
     def fail(self):
         self.status = RequestStatus.FAILED
 
-    def should_finish(self, token_id: int) -> bool:
+    def should_finish(self, token_id: int, num_computed_tokens: Optional[int] = None) -> bool:
         """Check if this request should finish given the latest token.
 
         Args:
             token_id: The ID of the most recently generated token
+            num_computed_tokens: Computed-token count as of the step that produced ``token_id``. Defaults to the
+                current value; async scheduling passes the value at launch because the next step may already
+                have advanced it.
 
         Returns:
             True if the request should finish, False otherwise
         """
+        if num_computed_tokens is None:
+            num_computed_tokens = self.num_computed_tokens
         # Check for EOS token
         if self.generation_config.eos_token_id is not None:
             if token_id == self.generation_config.eos_token_id:
@@ -117,7 +126,7 @@ class InferenceRequest:
 
         # Check for maximum length
         if self.generation_config.max_length is not None:
-            if self.num_computed_tokens + 1 >= self.generation_config.max_length:
+            if num_computed_tokens + 1 >= self.generation_config.max_length:
                 return True
 
         # Check for max_new_tokens
@@ -139,6 +148,7 @@ class InferenceRequest:
         self.num_computed_tokens = 0
         self.tokens_this_step = 0
         self.status = RequestStatus.PENDING
+        self.preempt_count += 1
 
     def finish(self):
         """Mark request as finished and release block ownership."""

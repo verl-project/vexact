@@ -52,6 +52,12 @@ class DriverWorker(Worker):
         # thread-local; starting on the main thread and stopping on the worker thread
         # causes "Can't disable Kineto profiler when it's not running".
         self.profiler.start()
+        if self.config.scheduler.async_scheduling and self.pp_info.pp_size == 1:
+            logger.info("Starting driver generation loop (async scheduling)")
+            self._async_generation_loop()
+            self.profiler.stop()
+            logger.info("Driver generation loop ended")
+            return
         logger.info("Starting driver generation loop")
         while not self._shutdown_event.is_set():
             try:
@@ -90,3 +96,35 @@ class DriverWorker(Worker):
 
         self.profiler.stop()
         logger.info("Driver generation loop ended")
+
+    def _async_generation_loop(self):
+        """One-step-lookahead loop: step N+1 is scheduled and launched before step N's tokens reach the host.
+
+        The scheduler plans step N+1 assuming every running request continues; decode inputs produced by step N
+        are read from its tokens on the GPU. While the GPU runs step N+1 the host waits only for step N,
+        processes its tokens and finalizes finished requests (their extra step-N+1 output is ignored because
+        they are marked finished). Per-request results are unchanged: batch composition does not affect them.
+        """
+        pending = None
+        while not self._shutdown_event.is_set():
+            batch_to_infer = self.scheduler.schedule().batch_to_infer
+            if not batch_to_infer and pending is None:
+                time.sleep(0.001)
+                continue
+
+            launched = None
+            if batch_to_infer:
+                with self.profiler.annotate_context_manager(f"inferencer.launch_Nreq{len(batch_to_infer)}"):
+                    launched = self.inferencer.launch(batch_to_infer, pending)
+
+            if pending is not None:
+                self.scheduler.update(
+                    pending.requests,
+                    pending.wait(),
+                    launch_preempt_counts=pending.preempt_counts,
+                    launch_num_computed=pending.num_computed,
+                )
+            pending = launched
+            if pending is None:
+                self.scheduler.flush_results()  # nothing in flight: held results are safe to deliver
+            self.profiler.step()
