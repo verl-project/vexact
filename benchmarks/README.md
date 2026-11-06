@@ -204,6 +204,9 @@ tile and any split-K per call:
     then un-sorted it with `scatter`, which deterministic mode turns into a sorted `index_put`: 35 ms
     of a 66 ms decode step at 512 sequences. `top_p >= 1` now skips top-p, and real top-p un-sorts
     with a one-writer-per-element Triton kernel (14 ms, the vocabulary sort itself).
+- **4-stage GEMM tile.** The 128×128×64 tile with 4 pipeline stages instead of 3 is 5% faster per
+    Qwen3-8B layer at M = 512 and gives the same bits; 3 stages remain where 4 do not fit shared
+    memory. +2.5% end to end on a 512-request Qwen3-8B wave.
 
 ### End to end vs vLLM
 

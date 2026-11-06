@@ -173,11 +173,14 @@ def get_compute_units():
 # Batch invariance does not depend on which one runs: every candidate reduces K sequentially from
 # zero in the same order, and on H100 BLOCK_M/N/K, stages, warps and the emitted MMA instruction
 # (wgmma m64nNk16 or mma.sync) all give bitwise-identical results for a fixed K order
-# (tests/batch_invariant_ops/test_matmul.py).
+# (tests/batch_invariant_ops/test_matmul.py). The cost model ignores pipeline stages, so of two
+# candidates it ties the earlier one wins: 128x128x64 uses 4 stages (5% faster per Qwen3-8B layer at
+# M=512) and falls back to 3 where 4 do not fit the device's shared memory.
 _BF16_MATMUL_CANDIDATES = (
     (64, 32, 128, 3, 4),
     (64, 64, 128, 3, 4),
     (64, 128, 128, 3, 4),
+    (128, 128, 64, 4, 8),
     (128, 128, 64, 3, 8),
     (128, 256, 64, 3, 8),
 )
