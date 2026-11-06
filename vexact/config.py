@@ -263,6 +263,14 @@ class SchedulerConfig:
         default=False,
         metadata={"help": "Distribute new sequence admissions evenly across PP batch slots to fill pipeline bubbles."},
     )
+    async_scheduling: bool = field(
+        default=False,
+        metadata={
+            "help": "Launch step N+1 before reading step N's sampled tokens on the host (pipeline_parallel_size == 1 "
+            "only). Decode inputs are taken from step N's tokens on the GPU, so host scheduling overlaps GPU work. "
+            "Per-request results are unchanged (batch invariance); requests that finish at step N waste one step."
+        },
+    )
 
     def __post_init__(self):
         """Validate scheduler configuration."""

@@ -265,6 +265,12 @@ def parse_arguments():
     # Continuous batching arguments
 
     parser.add_argument(
+        "--async_scheduling",
+        action="store_true",
+        help="Overlap host scheduling with GPU steps (SchedulerConfig.async_scheduling)",
+    )
+
+    parser.add_argument(
         "--max_num_batched_tokens",
         type=int,
         default=2048,
@@ -474,6 +480,7 @@ def run_continuous_batching(args, tokenizer, generation_config):
         scheduler=SchedulerConfig(
             max_num_batched_tokens=args.max_num_batched_tokens,
             enable_chunked_prefill=args.enable_chunked_prefill,
+            async_scheduling=args.async_scheduling,
         ),
         profiler=ProfilerConfig(
             backend=args.profile_backend,
