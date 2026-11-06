@@ -174,6 +174,10 @@ tile and any split-K per call:
     loads and `silu(gate) * up * gate_weight` runs as one Triton pass. That pass must replay VeOmni's
     three bf16 roundings with IEEE `expf` and division: a single fp32 chain with one rounding (as
     DeepGEMM's Mega MoE does) mismatches 33% of outputs. MoE layer 1.33–2.10× over VeOmni as shipped.
+- **No NaN fill of `torch.empty`.** `torch.use_deterministic_algorithms(True)` also fills every
+    uninitialized allocation with NaN: about 120 fill kernels per decode step, 9% of GPU time on the
+    MoE rollout. Every kernel writes its outputs before they are read, so batch-invariant mode turns
+    the fill off (1.07–1.08× end to end).
 
 ## Acknowledgements
 
