@@ -178,6 +178,12 @@ tile and any split-K per call:
     uninitialized allocation with NaN: about 120 fill kernels per decode step, 9% of GPU time on the
     MoE rollout. Every kernel writes its outputs before they are read, so batch-invariant mode turns
     the fill off (1.07–1.08× end to end).
+- **Fused RMSNorm and RoPE** (no-grad calls on HF Qwen3 / Qwen3-MoE). RMSNorm is written in Gluon so
+    each row is summed in exactly the layout of vexact's `mean_kernel`; a plain Triton kernel loads bf16
+    8-wide and changes 30% of the variances. Intermediate bf16 roundings use integer bit operations,
+    since Triton folds `.to(bf16).to(fp32)` in front of an add (6% of RoPE outputs changed). Row
+    lengths are limited to multiples of 1024 or a single power-of-two block. +17–28% end to end on
+    top of the earlier changes.
 
 ## Acknowledgements
 
