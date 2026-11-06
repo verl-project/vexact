@@ -55,6 +55,13 @@ def register_models() -> None:
                 "[VEXACT] register_models(): skipping VeOmni MoE kernel binding "
                 f"(no GPU kernel available: {preferred_moe_kernel}={preferred_error})"
             )
+        else:
+            if preferred_moe_kernel == "triton":
+                # Bit-identical launch tuning of the Triton expert GEMMs (see module docstring).
+                from vexact.batch_invariant_ops.moe_group_gemm_tuning import apply_moe_group_gemm_tuning
+
+                apply_moe_group_gemm_tuning()
+                print("[VEXACT] register_models(): tuned VeOmni Triton grouped-GEMM launches")
 
         from .qwen3_moe.modeling_qwen3_moe import apply_qwen3_moe_patches
 
