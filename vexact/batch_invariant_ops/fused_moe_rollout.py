@@ -73,12 +73,124 @@ def swiglu_gate(fc1_output: torch.Tensor, gate_weights_flat: torch.Tensor, sorte
     return out
 
 
+@triton.jit
+def _expert_block_hist_kernel(expert_ptr, hist_ptr, N, BLOCK: tl.constexpr, EP: tl.constexpr):
+    """Histogram of expert ids per BLOCK-sized chunk (no atomics)."""
+    b = tl.program_id(0)
+    offs = b * BLOCK + tl.arange(0, BLOCK)
+    m = offs < N
+    e = tl.load(expert_ptr + offs, mask=m, other=0).to(tl.int32)
+    tl.store(hist_ptr + b * EP + tl.arange(0, EP), tl.histogram(e, EP, mask=m))
+
+
+@triton.jit
+def _expert_prefix_kernel(
+    hist_ptr,
+    base_ptr,
+    splits_ptr,
+    cumsum_ptr,
+    n_blocks,
+    E,
+    EP: tl.constexpr,
+    EB: tl.constexpr,
+    CHUNK_T: tl.constexpr,
+    CHUNK: tl.constexpr,
+):
+    """Program p owns expert columns [p * EB, (p + 1) * EB). Every program sums all columns to get each
+    expert's first output row (exclusive cumsum over experts), then scans its own columns down the
+    block axis: base[b, e] = first row of expert e + rows of expert e in blocks before b."""
+    ex = tl.arange(0, EP)
+    rows_t = tl.arange(0, CHUNK_T)
+    totals = tl.zeros([EP], dtype=tl.int32)
+    for c in range(0, n_blocks, CHUNK_T):
+        m = (c + rows_t < n_blocks)[:, None]
+        totals += tl.sum(tl.load(hist_ptr + (c + rows_t)[:, None] * EP + ex[None, :], mask=m, other=0), axis=0)
+    inclusive = tl.cumsum(totals, axis=0)
+    if tl.program_id(0) == 0:
+        tl.store(splits_ptr + ex, totals, mask=ex < E)
+        tl.store(cumsum_ptr + ex, inclusive.to(tl.int64), mask=ex < E)
+    cols = tl.program_id(0) * EB + tl.arange(0, EB)
+    # this program's slice of the exclusive cumsum (EB x EP select; no register gather needed)
+    running = tl.sum(tl.where(cols[:, None] == ex[None, :], (inclusive - totals)[None, :], 0), axis=1)
+    rows = tl.arange(0, CHUNK)
+    for c in range(0, n_blocks, CHUNK):
+        m = (c + rows < n_blocks)[:, None]
+        tile = tl.load(hist_ptr + (c + rows)[:, None] * EP + cols[None, :], mask=m, other=0)
+        excl = tl.cumsum(tile, axis=0) - tile
+        tl.store(base_ptr + (c + rows)[:, None] * EP + cols[None, :], running[None, :] + excl, mask=m)
+        running += tl.sum(tile, axis=0)
+
+
+@triton.jit
+def _expert_scatter_kernel(expert_ptr, base_ptr, order_ptr, scatter_ptr, N, BLOCK: tl.constexpr, EP: tl.constexpr):
+    """Stable position of each element of a block. Sorting the unique keys (expert * BLOCK + i) puts the
+    block in (expert, index) order; an element at sorted slot j has rank j - (block rows with a smaller
+    expert) among its expert's rows. Writes scatter_index[i] = pos and sorted_order[pos] = i."""
+    b = tl.program_id(0)
+    i = tl.arange(0, BLOCK)
+    offs = b * BLOCK + i
+    m = offs < N
+    e = tl.load(expert_ptr + offs, mask=m, other=0).to(tl.int32)
+    h = tl.histogram(e, EP, mask=m)
+    smaller = tl.cumsum(h, axis=0) - h  # block rows with a smaller expert id
+    key = tl.sort(tl.where(m, e * BLOCK + i, EP * BLOCK))  # padding sorts last
+    valid = key < EP * BLOCK
+    e_s = tl.where(valid, key // BLOCK, 0)
+    src = b * BLOCK + key % BLOCK
+    pos = tl.load(base_ptr + b * EP + e_s, mask=valid, other=0) + i - tl.gather(smaller, e_s, 0)
+    tl.store(scatter_ptr + src, pos, mask=valid)
+    tl.store(order_ptr + pos, src.to(tl.int64), mask=valid)
+
+
+def _sort_block(n: int) -> int:
+    # Larger blocks mean fewer histogram rows to scan; smaller ones keep enough programs busy for small n.
+    # The result does not depend on the block size (the stable order is unique).
+    return min(1024, max(128, triton.next_power_of_2(triton.cdiv(n, 128))))
+
+
+def expert_counting_sort(selected_experts: torch.Tensor, num_experts: int):
+    """Stable counting sort of expert ids. Returns ``(splits int32 [E], cumsum int64 [E], sorted_order int64
+    [N], scatter_index int32 [T, topk])``, identical to VeOmni's ``expert_histogram`` +
+    ``compute_expert_scatter_index`` (stable argsort) + ``torch.cumsum``, in three small kernels instead of
+    a general-purpose radix sort."""
+    flat = selected_experts.reshape(-1)
+    n = flat.numel()
+    ep = triton.next_power_of_2(num_experts)
+    block = _sort_block(n)
+    n_blocks = max(1, triton.cdiv(n, block))
+    eb = min(16, ep)
+    dev = flat.device
+    hist = torch.empty((n_blocks, ep), dtype=torch.int32, device=dev)
+    base = torch.empty((n_blocks, ep), dtype=torch.int32, device=dev)
+    splits = torch.empty((num_experts,), dtype=torch.int32, device=dev)
+    cumsum = torch.empty((num_experts,), dtype=torch.int64, device=dev)
+    sorted_order = torch.empty((n,), dtype=torch.int64, device=dev)
+    scatter_index = torch.empty((n,), dtype=torch.int32, device=dev)
+    nw = 8 if block >= 512 else 4
+    nb_p2 = triton.next_power_of_2(n_blocks)  # prefix tiles: up to ~8K entries, no taller than the block count
+    _expert_block_hist_kernel[(n_blocks,)](flat, hist, n, BLOCK=block, EP=ep, num_warps=nw)
+    _expert_prefix_kernel[(ep // eb,)](
+        hist,
+        base,
+        splits,
+        cumsum,
+        n_blocks,
+        num_experts,
+        EP=ep,
+        EB=eb,
+        CHUNK_T=min(nb_p2, max(1, 8192 // ep)),
+        CHUNK=min(nb_p2, 8192 // eb),
+        num_warps=8 if nb_p2 * ep >= 8192 else 4,
+    )
+    _expert_scatter_kernel[(n_blocks,)](flat, base, sorted_order, scatter_index, n, BLOCK=block, EP=ep, num_warps=nw)
+    return splits, cumsum, sorted_order, scatter_index.view(selected_experts.shape)
+
+
 def _wrap_fused_moe_forward(veomni_forward):
     """Wrap VeOmni's bound ``_fused_moe_forward`` with the inference-only path above."""
     from veomni.distributed.parallel_state import get_parallel_state
     from veomni.ops.kernels.moe import group_gemm as fused_moe_module
-    from veomni.ops.kernels.moe._kernels.kernel.moe import expert_histogram, moe_gather, moe_scatter
-    from veomni.ops.kernels.moe._scatter import compute_expert_scatter_index
+    from veomni.ops.kernels.moe._kernels.kernel.moe import moe_gather, moe_scatter
 
     from .moe_group_gemm_tuning import _OGS_MIN_ROWS, _load_matmul_ogs
 
@@ -120,14 +232,14 @@ def _wrap_fused_moe_forward(veomni_forward):
         group_gemm = fused_moe_module.group_gemm_same_nk  # tuned / matmul_ogs dispatch, VeOmni-identical
         topk = selected_experts.shape[-1]
         x = hidden_states.reshape(-1, hidden_states.shape[-1])
-        splits = expert_histogram(selected_experts, num_experts)
-        sorted_order, scatter_index = compute_expert_scatter_index(selected_experts)
-        cumsum = torch.cumsum(splits, dim=0)
+        # Stable counting sort: the same permutation as VeOmni's stable argsort, so every downstream bit
+        # is unchanged; replaces expert_histogram + a radix sort + inverse scatter + cumsum.
+        splits, cumsum, sorted_order, scatter_index = expert_counting_sort(selected_experts, num_experts)
         rows = sorted_order.shape[0]
 
         if rows > _OGS_MIN_ROWS:
             gather = (sorted_order.to(torch.int32), scatter_index.reshape(-1).to(torch.int32))
-            fc1 = matmul_ogs(x, fc1_1_2_weight.transpose(1, 2), splits.to(torch.int32), topk, gather)
+            fc1 = matmul_ogs(x, fc1_1_2_weight.transpose(1, 2), splits, topk, gather)
         else:
             fc1 = group_gemm(
                 a=moe_scatter(x, scatter_index),

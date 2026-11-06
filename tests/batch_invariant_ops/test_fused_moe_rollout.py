@@ -24,8 +24,14 @@ if not torch.cuda.is_available():
 
 import veomni.ops.kernels.moe as moe_ops  # noqa: E402
 from veomni.ops.kernels.moe import apply_veomni_fused_moe_patch  # noqa: E402
+from veomni.ops.kernels.moe._kernels.kernel.moe import expert_histogram  # noqa: E402
+from veomni.ops.kernels.moe._scatter import compute_expert_scatter_index  # noqa: E402
 from veomni.ops.kernels.moe.group_gemm import group_gemm_fused_moe_forward  # noqa: E402
-from vexact.batch_invariant_ops.fused_moe_rollout import apply_rollout_fused_moe, swiglu_gate  # noqa: E402
+from vexact.batch_invariant_ops.fused_moe_rollout import (  # noqa: E402
+    apply_rollout_fused_moe,
+    expert_counting_sort,
+    swiglu_gate,
+)
 from vexact.batch_invariant_ops.moe_group_gemm_tuning import apply_moe_group_gemm_tuning  # noqa: E402
 
 
@@ -51,6 +57,24 @@ def test_swiglu_gate_replays_eager_roundings():
     out = swiglu_gate(torch.cat([gate, up], dim=1), weights, order)
     same = (_bits(out) == _bits(ref)) | (torch.isnan(out) & torch.isnan(ref))
     assert bool(same.all())
+
+
+@pytest.mark.parametrize("experts, topk", [(128, 8), (60, 4), (256, 8)])
+@pytest.mark.parametrize("tokens", [1, 127, 129, 1000, 16384, 65536])
+@pytest.mark.parametrize("kind", ["random", "same", "hot"])
+def test_counting_sort_matches_veomni(experts, topk, tokens, kind):
+    g = torch.Generator(device="cuda").manual_seed(tokens)
+    if kind == "same":  # every token picks the same experts
+        idx = torch.arange(topk, device="cuda").repeat(tokens, 1)
+    else:
+        logits = torch.randn(tokens, experts, device="cuda", generator=g)
+        logits[:, :topk] += 6 if kind == "hot" else 0
+        idx = logits.topk(topk, dim=-1).indices
+    splits = expert_histogram(idx, experts)
+    order, scatter = compute_expert_scatter_index(idx)
+    ref = (splits, torch.cumsum(splits, dim=0), order, scatter)
+    for a, b in zip(expert_counting_sort(idx, experts), ref):
+        assert a.dtype == b.dtype and a.shape == b.shape and torch.equal(a, b)
 
 
 def _routing(tokens, flip=False):
