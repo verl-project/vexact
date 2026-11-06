@@ -43,7 +43,7 @@ def _load_generated_texts(metadata_path: Path) -> list[str]:
     return generated_texts
 
 
-def _run_simulation_and_compare(tmp_path: Path, pipeline_parallel_size: int):
+def _run_simulation_and_compare(tmp_path: Path, pipeline_parallel_size: int, async_scheduling: bool = False):
     repo_root = Path(__file__).resolve().parents[1]
     baseline_path = repo_root / "tests/ref_data" / "metadata.json"
     if not baseline_path.exists():
@@ -76,6 +76,8 @@ def _run_simulation_and_compare(tmp_path: Path, pipeline_parallel_size: int):
         "--output_dir",
         str(output_dir),
     ]
+    if async_scheduling:
+        cmd.append("--async_scheduling")
 
     env = os.environ.copy()
     env.setdefault("CUDA_VISIBLE_DEVICES", "0")
@@ -124,3 +126,8 @@ def _run_simulation_and_compare(tmp_path: Path, pipeline_parallel_size: int):
 @pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
 def test_simulated_generation_matches_baseline(tmp_path: Path, pipeline_parallel_size: int):
     _run_simulation_and_compare(tmp_path, pipeline_parallel_size)
+
+
+def test_async_scheduling_matches_baseline(tmp_path: Path):
+    """Async scheduling changes batch composition but, by batch invariance, no generated token."""
+    _run_simulation_and_compare(tmp_path, 1, async_scheduling=True)
