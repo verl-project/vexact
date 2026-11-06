@@ -193,6 +193,13 @@ tile and any split-K per call:
     warp 0, so its sum is "4 values per lane in order, then a 32-lane butterfly"; a kernel that keeps
     exactly that while packing 16 rows per program takes the q/k norms from 235 to 46.5 µs (262k rows).
     RoPE runs one program per token over all heads: 159 → 48.9 µs (8192 tokens × 32 heads).
+- **MoE routing as a counting sort.** VeOmni orders routed rows with a histogram, a general stable
+    `argsort` (multi-pass radix sort), an inverse scatter and a `cumsum`: ~40 µs per call at decode.
+    Expert ids are small integers, so a stable counting sort gives the same permutation in three small
+    kernels (per-block histograms, a column-parallel prefix, in-block ranks from sorting unique keys
+    `expert * BLOCK + i`). 3.3–14× faster from 1 to 65,536 tokens. A first version scanned blocks in
+    one program and lost to the radix sort above ~32k routed rows; parallelizing the prefix over
+    expert columns and growing the block to 1024 rows fixed that without a fallback.
 
 ## Acknowledgements
 
