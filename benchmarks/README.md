@@ -163,6 +163,10 @@ tile and any split-K per call:
 - **LM head on sampled rows only.** Rollout ran `lm_head` on every packed token, prefill chunks and
     CUDA-graph padding included, then kept one row per request. It now passes each request's last row
     as `logits_to_keep`. About 2.5 TFLOP saved on a 4096-token mixed step of Qwen3-1.7B.
+- **MoE expert GEMM launches.** VeOmni ships no tuned configs, so every expert GEMM ran a fallback
+    128×128×32 tile. Launching the same kernel with a tile chosen by routed-row count reaches the
+    weight-streaming bound at decode: the MoE layer is 1.16–1.45× faster for T ≤ 512 tokens
+    (Qwen3-30B-A3B shapes).
 
 ## Acknowledgements
 
