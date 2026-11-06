@@ -99,6 +99,15 @@ class InputBuffers:
         self.position_ids = TensorBuffer.create(
             1, max_num_batched_tokens, dtype=torch.long, device=device, fill_value=0
         )
+        # Row of each sequence's last token in the packed batch, passed to the model as
+        # `logits_to_keep` so the LM head only runs on rows that get sampled.
+        self.last_token_idx = TensorBuffer.create(max_num_seqs, dtype=torch.long, device=device, fill_value=0)
+
+    def fill_last_token_idx(self, num_seqs: int) -> torch.Tensor:
+        """Refresh `last_token_idx[:num_seqs]` from `query_start_loc` (on device) and return it."""
+        out = self.last_token_idx.gpu[:num_seqs]
+        torch.sub(self.query_start_loc.gpu[1 : num_seqs + 1], 1, out=out)
+        return out
 
     def get_kv_context_tensors(
         self, num_seqs: int, num_tokens: int
