@@ -6,6 +6,7 @@
 # Modifications copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
 
 import contextlib
+import functools
 import os
 from collections import namedtuple
 from collections.abc import Callable
@@ -74,7 +75,12 @@ def matmul_kernel_persistent(
     B_LARGE: tl.constexpr,
     C_LARGE: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    EVEN_M: tl.constexpr = True,
 ):
+    # EVEN_M (M % BLOCK_SIZE_M == 0): no out-of-range A rows. Otherwise rows >= M are masked to zero
+    # instead of being clamped to row 0: clamping makes every padded row re-read the same address,
+    # which is 3-4.5x slower for M < BLOCK_SIZE_M on H100. Either way each valid output row is
+    # bitwise identical, since rows never interact and the K order is unchanged.
     start_pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -96,9 +102,10 @@ def matmul_kernel_persistent(
             offs_am = offs_am.to(tl.int64)
         if B_LARGE:
             offs_bn = offs_bn.to(tl.int64)
-        offs_am = tl.where(offs_am < M, offs_am, 0)
+        a_row_mask = offs_am < M
+        if EVEN_M:
+            offs_am = tl.max_contiguous(tl.multiple_of(offs_am, BLOCK_SIZE_M), BLOCK_SIZE_M)
         offs_bn = tl.where(offs_bn < N, offs_bn, 0)
-        offs_am = tl.max_contiguous(tl.multiple_of(offs_am, BLOCK_SIZE_M), BLOCK_SIZE_M)
         offs_bn = tl.max_contiguous(tl.multiple_of(offs_bn, BLOCK_SIZE_N), BLOCK_SIZE_N)
 
         accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
@@ -110,7 +117,14 @@ def matmul_kernel_persistent(
             a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
             b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
 
-            a = tl.load(a_ptrs, mask=offs_k_for_mask[None, :] < K - ki * BLOCK_SIZE_K, other=0.0)
+            if EVEN_M:
+                a = tl.load(a_ptrs, mask=offs_k_for_mask[None, :] < K - ki * BLOCK_SIZE_K, other=0.0)
+            else:
+                a = tl.load(
+                    a_ptrs,
+                    mask=a_row_mask[:, None] & (offs_k_for_mask[None, :] < K - ki * BLOCK_SIZE_K),
+                    other=0.0,
+                )
             b = tl.load(b_ptrs, mask=offs_k_for_mask[:, None] < K - ki * BLOCK_SIZE_K, other=0.0)
             accumulator = tl.dot(a, b, accumulator)
 
@@ -155,6 +169,112 @@ def get_compute_units():
     return NUM_SMS
 
 
+# (BLOCK_M, BLOCK_N, BLOCK_K, num_stages, num_warps) candidates for the bf16 persistent GEMM.
+# Batch invariance does not depend on which one runs: every candidate reduces K sequentially from
+# zero in the same order, and on H100 BLOCK_M/N/K, stages, warps and the emitted MMA instruction
+# (wgmma m64nNk16 or mma.sync) all give bitwise-identical results for a fixed K order
+# (tests/batch_invariant_ops/test_matmul.py).
+_BF16_MATMUL_CANDIDATES = (
+    (64, 32, 128, 3, 4),
+    (64, 64, 128, 3, 4),
+    (64, 128, 128, 3, 4),
+    (128, 128, 64, 3, 8),
+    (128, 256, 64, 3, 8),
+)
+
+
+def _as_cfg(cand: tuple) -> dict:
+    bm, bn, bk, stages, warps = cand
+    return {
+        "BLOCK_SIZE_M": bm,
+        "BLOCK_SIZE_N": bn,
+        "BLOCK_SIZE_K": bk,
+        "GROUP_SIZE_M": 8,
+        "num_stages": stages,
+        "num_warps": warps,
+    }
+
+
+# First-order cost model constants used only to rank candidates. They are fitted on H100 SXM to
+# minimize selection regret against measured times of every candidate on 12 Qwen3 projection
+# shapes x 9 batch sizes: 0.13% geomean / 4.5% worst regret, 1.53x geomean faster than the previous
+# fixed 128x128x64 config. Only their ratios matter for the ranking.
+_MODEL_CLK_GHZ = 1.83
+_MODEL_MMA_FLOPS_PER_CLK = {4: 1024.0, 8: 2048.0}  # per SM, by num_warps (1 or 2 consumer warpgroups)
+_MODEL_INGEST_B_PER_CLK = 24.0  # effective L2 -> SM bytes per clock per SM
+_MODEL_TILE_OVERHEAD_CLK = 6000.0  # pipeline fill + epilogue per tile
+_MODEL_DRAM_B_PER_US = 3.0e6
+
+
+def _predict_us(cand: tuple, M: int, N: int, K: int, num_sms: int) -> tuple[float, float]:
+    """(predicted time, SM-side time). The second key breaks ties when every candidate is bound by
+    HBM bandwidth: then fewer, larger tiles win because they pay less per-tile overhead."""
+    bm, bn, _bk, _stages, warps = cand
+    tiles = triton.cdiv(M, bm) * triton.cdiv(N, bn)
+    waves = triton.cdiv(tiles, num_sms)
+    mma_clk = 2.0 * bm * bn * K / _MODEL_MMA_FLOPS_PER_CLK[warps]
+    load_clk = (min(bm, M) + bn) * K * 2.0 / _MODEL_INGEST_B_PER_CLK
+    sm_us = waves * (max(mma_clk, load_clk) + _MODEL_TILE_OVERHEAD_CLK) / (_MODEL_CLK_GHZ * 1e3)
+    dram_us = (M * K + N * K + M * N) * 2.0 / _MODEL_DRAM_B_PER_US
+    return max(sm_us, dram_us), sm_us
+
+
+@functools.lru_cache(maxsize=4096)
+def _ranked_bf16_candidates(M: int, N: int, K: int, num_sms: int) -> tuple:
+    """Candidates by predicted time (first-order model, see benchmarks/README.md): a CTA's time per
+    tile is the larger of its tensor-core time and its L2->SM ingest time, tiles run in waves over the
+    SMs, and the kernel can never beat streaming A, B and C through HBM."""
+    return tuple(sorted(_BF16_MATMUL_CANDIDATES, key=lambda c: _predict_us(c, M, N, K, num_sms)))
+
+
+@functools.cache
+def _max_shared_mem(device_index: int) -> int:
+    return triton.runtime.driver.active.utils.get_device_properties(device_index)["max_shared_mem"]
+
+
+def _launch_args(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, bias: torch.Tensor | None, num_sms: int):
+    """Positional args and non-tile constexprs of matmul_kernel_persistent for c = a @ b (+ bias)."""
+    (M, K), N = a.shape, b.shape[1]
+    args = (a, b, c, bias, M, N, K, a.stride(0), a.stride(1), b.stride(0), b.stride(1), c.stride(0), c.stride(1))
+    flags = dict(
+        NUM_SMS=num_sms,
+        A_LARGE=a.numel() > 2**31,
+        B_LARGE=b.numel() > 2**31,
+        C_LARGE=c.numel() > 2**31,
+        HAS_BIAS=bias is not None,
+    )
+    return args, flags
+
+
+def _fits_shared_memory(args: tuple, flags: dict, cfg: dict) -> bool:
+    """Compile (without launching) the kernel for this call and config and compare its shared memory with
+    the device's. It depends on the GPU and on the operand layout: every candidate fits an H100, while on
+    Ada (99 KB, e.g. L20) the widest tiles do not fit a transposed nn.Linear weight."""
+    even_m = args[4] % cfg["BLOCK_SIZE_M"] == 0
+    kernel = matmul_kernel_persistent.warmup(*args, **flags, EVEN_M=even_m, **cfg, grid=(1,))
+    return kernel.metadata.shared <= _max_shared_mem(args[0].device.index)
+
+
+_BF16_CONFIG_CACHE: dict[tuple, dict] = {}
+
+
+def _bf16_matmul_config(args: tuple, flags: dict) -> dict:
+    """The candidate with the lowest predicted time among those that fit the device's shared memory."""
+    key = (args[4:], args[0].device.index, tuple(flags.items()))
+    if key not in _BF16_CONFIG_CACHE:
+        M, N, K = args[4:7]
+        fitting = (
+            _as_cfg(c)
+            for c in _ranked_bf16_candidates(M, N, K, flags["NUM_SMS"])
+            if _fits_shared_memory(args, flags, _as_cfg(c))
+        )
+        cfg = next(fitting, None)
+        if cfg is None:
+            raise RuntimeError(f"No bf16 matmul tile fits the device's shared memory for {M=}, {N=}, {K=}")
+        _BF16_CONFIG_CACHE[key] = cfg
+    return _BF16_CONFIG_CACHE[key]
+
+
 @proton.cpu_timed_scope("matmul_persistent")
 def matmul_persistent(a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None):
     # Check constraints.
@@ -178,53 +298,29 @@ def matmul_persistent(a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | Non
             ),
         )
 
-    configs = {
-        torch.bfloat16: {
-            "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": 128,
-            "BLOCK_SIZE_K": 64,
-            "GROUP_SIZE_M": 8,
-            "num_stages": 3,
-            "num_warps": 8,
-        },
-        torch.float16: {
-            "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": 256,
-            "BLOCK_SIZE_K": 64,
-            "GROUP_SIZE_M": 8,
-            "num_stages": 3,
-            "num_warps": 8,
-        },
-        torch.float32: {
-            "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": 128,
-            "BLOCK_SIZE_K": 32,
-            "GROUP_SIZE_M": 8,
-            "num_stages": 3,
-            "num_warps": 8,
-        },
-    }
-    matmul_kernel_persistent[grid](
-        a,
-        b,
-        c,  #
-        bias,
-        M,
-        N,
-        K,  #
-        a.stride(0),
-        a.stride(1),  #
-        b.stride(0),
-        b.stride(1),  #
-        c.stride(0),
-        c.stride(1),  #
-        NUM_SMS=NUM_SMS,  #
-        A_LARGE=a.numel() > 2**31,
-        B_LARGE=b.numel() > 2**31,
-        C_LARGE=c.numel() > 2**31,
-        HAS_BIAS=bias is not None,
-        **configs[dtype],
-    )
+    args, flags = _launch_args(a, b, c, bias, NUM_SMS)
+    if dtype == torch.bfloat16:
+        config = _bf16_matmul_config(args, flags)
+    else:
+        config = {
+            torch.float16: {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 256,
+                "BLOCK_SIZE_K": 64,
+                "GROUP_SIZE_M": 8,
+                "num_stages": 3,
+                "num_warps": 8,
+            },
+            torch.float32: {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+                "num_stages": 3,
+                "num_warps": 8,
+            },
+        }[dtype]
+    matmul_kernel_persistent[grid](*args, **flags, EVEN_M=M % config["BLOCK_SIZE_M"] == 0, **config)
     return c
 
 
