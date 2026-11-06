@@ -160,6 +160,9 @@ tile and any split-K per call:
     clamped to row 0, which made M < BLOCK_M 3–4.5× slower; they are now masked. The bf16 tile is
     picked per shape from 5 candidates by the model above, with constants fitted to measured times
     (0.13% geomean regret). Decode sizes (M ≤ 64) are 2.2–5× faster, prefill sizes 1.1–1.4×.
+- **LM head on sampled rows only.** Rollout ran `lm_head` on every packed token, prefill chunks and
+    CUDA-graph padding included, then kept one row per request. It now passes each request's last row
+    as `logits_to_keep`. About 2.5 TFLOP saved on a 4096-token mixed step of Qwen3-1.7B.
 
 ## Acknowledgements
 
