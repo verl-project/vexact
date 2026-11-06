@@ -61,8 +61,12 @@ class CudaGraphManager:
         max_size: int,
         pool: Any | None = None,
         forward_kwargs: dict[str, Any] | None = None,
+        logits_for_last_tokens_only: bool = False,
     ):
         self.model = model
+        # When set, the model gets `logits_to_keep` from the static last_token_idx buffer, which the
+        # caller refreshes from query_start_loc before every replay.
+        self.logits_for_last_tokens_only = logits_for_last_tokens_only
         self.device = device
         self.cache_config = cache_config
         self.cache_store = cache_store
@@ -153,6 +157,8 @@ class CudaGraphManager:
         query_start_loc[0].zero_()
         query_start_loc[1:].copy_(tokens_per_seq.cumsum(0))
         context_lens.copy_(tokens_per_seq)
+        if self.logits_for_last_tokens_only:
+            static_inputs["logits_to_keep"] = self.input_buffers.fill_last_token_idx(num_seqs)
 
         # Warm up to ensure kernels are initialized before graph capture.
         set_kv_cache_context(

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import logging
 from typing import Any, Optional, Sequence
 
@@ -78,6 +79,11 @@ class Inferencer:
             output_hidden_states=True,
             use_fused_lce=False,  # we need logits in model inference outputs
         )
+        # Run the LM head only on each sequence's last token (passed as `logits_to_keep` row
+        # indices) instead of on every packed token, prefill chunks and CUDA-graph padding
+        # included. Bitwise neutral: the batch-invariant matmul computes each row independently.
+        # Enabled only for models whose forward takes `logits_to_keep`; others keep full logits.
+        self.logits_for_last_tokens_only = "logits_to_keep" in inspect.signature(self.model.forward).parameters
         self.sampler = Sampler()
         # When training side uses fused lce, logits are upcasted to fp32 for computing logprobs
         # Eager path computes log_probs from bf16 logits to save GPU memory
@@ -116,6 +122,7 @@ class Inferencer:
                 cache_config=self.cache_config,
                 forward_kwargs=self.forward_kwargs,
                 input_buffers=self.input_buffers,
+                logits_for_last_tokens_only=self.logits_for_last_tokens_only,
             )
             self._cudagraph_mgr.capture_graphs()
         else:
@@ -322,6 +329,9 @@ class Inferencer:
             # fake requests.
             buffers.block_tables.gpu[num_seqs:graph_num_seqs, :].zero_()
             buffers.query_start_loc.gpu[num_seqs + 1 : graph_num_seqs + 1] = total_tokens
+        if self.logits_for_last_tokens_only:
+            # The captured graph reads logits_to_keep from this static buffer.
+            buffers.fill_last_token_idx(graph_num_seqs)
 
         num_tokens = gen_ctx.batch_position_ids.shape[1]
         if gen_ctx.batch_input_ids is not None:
@@ -373,11 +383,15 @@ class Inferencer:
     def _forward_eager(self, gen_ctx: GenerationContext) -> Any:
         # TODO: we can extend scope name with better context such as new_req_num and cached_req_num
         with torch.cuda.nvtx.range("model_forward_eager"):
+            extra = {}
+            if self.logits_for_last_tokens_only:
+                extra["logits_to_keep"] = (gen_ctx.query_start_loc[1:] - 1).to(dtype=torch.long)
             outputs = self.model.forward(
                 input_ids=gen_ctx.batch_input_ids,
                 intermediate_tensors=gen_ctx.intermediate_tensors,
                 position_ids=gen_ctx.batch_position_ids,
                 **self.forward_kwargs,
+                **extra,
             )
 
         return outputs
@@ -397,11 +411,17 @@ class Inferencer:
         outputs: ModelOutput,
         gen_ctx: GenerationContext,
     ) -> tuple[Tensor, list[Tensor], list[Tensor]]:
-        # Collect indices for all requests and slice logits once to avoid per-token LM head work
-        # The selected token is always the last token in each request slice. For decode
-        # requests the slice length is 1, so this is also the first token.
-        last_token_positions_tensor = (gen_ctx.query_start_loc[1:] - 1).to(dtype=torch.long)
-        batched_logits = outputs.logits[0, last_token_positions_tensor, :]
+        if self.logits_for_last_tokens_only:
+            # The model ran the LM head only on each request's last token (logits_to_keep), so
+            # logits rows are already in request order. CUDA-graph replays may carry extra rows
+            # for padded requests; keep the real ones.
+            num_seqs = gen_ctx.query_start_loc.numel() - 1
+            batched_logits = outputs.logits[0, :num_seqs, :]
+        else:
+            # The selected token is always the last token in each request slice. For decode
+            # requests the slice length is 1, so this is also the first token.
+            last_token_positions_tensor = (gen_ctx.query_start_loc[1:] - 1).to(dtype=torch.long)
+            batched_logits = outputs.logits[0, last_token_positions_tensor, :]
 
         # Use batch sampler when sampling params are uniform across the batch.
         sample_ref = gen_configs[0]
