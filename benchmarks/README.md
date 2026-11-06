@@ -154,6 +154,13 @@ tile and any split-K per call:
     straggler phase). A fixed split *size* with an in-kernel ordered combine removes it, but training
     must then use the same split.
 
+### Changes and measured effect
+
+- **Dense GEMM tiles** (`matmul_persistent`, used by training and rollout). Rows beyond M were
+    clamped to row 0, which made M < BLOCK_M 3–4.5× slower; they are now masked. The bf16 tile is
+    picked per shape from 5 candidates by the model above, with constants fitted to measured times
+    (0.13% geomean regret). Decode sizes (M ≤ 64) are 2.2–5× faster, prefill sizes 1.1–1.4×.
+
 ## Acknowledgements
 
 Adapted from [vLLM](https://github.com/vllm-project/vllm) (Apache-2.0).
