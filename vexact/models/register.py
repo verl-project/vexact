@@ -62,6 +62,12 @@ def register_models() -> None:
 
                 apply_moe_group_gemm_tuning()
                 print("[VEXACT] register_models(): tuned VeOmni Triton grouped-GEMM launches")
+                # Inference-only fused MoE forward, bitwise identical to VeOmni's (no-grad calls only;
+                # see vexact/batch_invariant_ops/fused_moe_rollout.py).
+                from vexact.batch_invariant_ops.fused_moe_rollout import apply_rollout_fused_moe
+
+                apply_rollout_fused_moe()
+                print("[VEXACT] register_models(): inference fused MoE forward active")
 
         from .qwen3_moe.modeling_qwen3_moe import apply_qwen3_moe_patches
 
