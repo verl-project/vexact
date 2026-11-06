@@ -189,6 +189,10 @@ tile and any split-K per call:
     (GPU busy 84% of wall time). Step N+1 now launches before step N's tokens reach the host, with
     decode inputs copied on the GPU. Batch composition changes but, by batch invariance, no token does.
     1.21× on a 4096-request MoE rollout.
+- **Norm and RoPE at the bandwidth bound.** A 128-wide row in `mean_kernel`'s layout sits entirely in
+    warp 0, so its sum is "4 values per lane in order, then a 32-lane butterfly"; a kernel that keeps
+    exactly that while packing 16 rows per program takes the q/k norms from 235 to 46.5 µs (262k rows).
+    RoPE runs one program per token over all heads: 159 → 48.9 µs (8192 tokens × 32 heads).
 
 ## Acknowledgements
 
