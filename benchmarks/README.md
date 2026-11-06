@@ -116,6 +116,44 @@ P50 latency: 7.226s
 P95 latency: 15.478s
 ```
 
+## Batch-invariant kernel performance
+
+Notes behind the batch-invariance performance work, measured on one H100 SXM. Every change listed here
+leaves rollout tokens and logprobs bitwise identical, so training/rollout alignment is unaffected.
+
+### What invariance constrains
+
+A reduction's result depends on its evaluation tree, because floating-point addition is not
+associative. Batch invariance needs each output's tree to depend only on static quantities (K,
+head_dim, a static chunk size) and the element's own extent (its KV length), never on the batch.
+That leaves a lot free:
+
+| free per call                                           | fixed (it is the tree)                                    |
+| ------------------------------------------------------- | --------------------------------------------------------- |
+| tile shape (BM, BN, BK), stages, warps, persistence     | where K / KV is split and the order partials are combined |
+| which CTA computes which tile, grid size, rasterization | FMA contraction and rounding points in epilogues          |
+| on H100 bf16: `wgmma` vs `mma.sync`, any instruction N  |                                                           |
+
+On H100 every tile and MMA instruction gives identical bits for a fixed K order. Two compiler
+hazards change bits silently and need guarding: Triton folds `dot` + `add` across a K chunk boundary
+when a chunk has a single k-iteration, and it drops a `.to(bf16).to(fp32)` round trip in front of an
+add (round with integer bit operations instead).
+
+### Is invariance free? A first-order model
+
+Per tile, time = max(tensor-core time, L2→SM ingest time) + fixed overhead; tiles run in waves over
+the SMs; nothing beats streaming the operands through HBM. Compared with an oracle that may pick any
+tile and any split-K per call:
+
+- **Dense GEMM.** A fixed 128×128 tile without K splits loses up to 1.5–2.5× at decode batch sizes
+    on narrow layers (o_proj, down: too few tiles to pull HBM bandwidth). Choosing the tile per shape
+    recovers most of it at no numerical risk. The rest needs a static K split chosen from (N, K) only.
+- **Grouped (MoE) GEMM.** Within 3–12% of the oracle: the expert dimension supplies the parallelism
+    a small batch can't.
+- **Decode attention.** `num_splits=1` loses 3–6.5× at small batch × long context (RL's long-tail
+    straggler phase). A fixed split *size* with an in-kernel ordered combine removes it, but training
+    must then use the same split.
+
 ## Acknowledgements
 
 Adapted from [vLLM](https://github.com/vllm-project/vllm) (Apache-2.0).
