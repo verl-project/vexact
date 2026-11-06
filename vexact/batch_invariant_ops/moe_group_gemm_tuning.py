@@ -44,18 +44,21 @@ _OGS_MIN_ROWS = 2048
 
 
 def _load_matmul_ogs():
-    """Return a callable (a, w_ekn, splits) -> out using triton_kernels' ragged matmul_ogs."""
-    from triton_kernels.matmul_ogs import RoutingData, matmul_ogs
+    """Return a callable ``(a, w_ekn, splits, topk=1, gather=None) -> out`` using triton_kernels' ragged
+    matmul_ogs. With ``gather=(src, dst)`` the rows of ``a`` are tokens, gathered into expert order by the
+    GEMM's loads."""
+    from triton_kernels.matmul_ogs import GatherIndx, RoutingData, matmul_ogs
     from triton_kernels.matmul_ogs_details.opt_flags import update_opt_flags_constraints
     from triton_kernels.tensor import make_ragged_tensor_metadata
 
     # Batch-dependent split-K would change the reduction tree; keep one CTA per output tile.
     update_opt_flags_constraints({"split_k": 1})
 
-    def run(a, w_ekn, splits):
-        rows = a.shape[0]
-        routing = RoutingData(None, splits, splits.shape[0], 1, make_ragged_tensor_metadata(splits, rows))
-        return matmul_ogs(a, w_ekn, None, routing)
+    def run(a, w_ekn, splits, topk=1, gather=None):
+        rows = a.shape[0] if gather is None else gather[0].shape[0]
+        routing = RoutingData(None, splits, splits.shape[0], topk, make_ragged_tensor_metadata(splits, rows))
+        gather_indx = None if gather is None else GatherIndx(src_indx=gather[0], dst_indx=gather[1])
+        return matmul_ogs(a, w_ekn, None, routing, gather_indx=gather_indx)
 
     return run
 
