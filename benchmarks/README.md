@@ -170,6 +170,10 @@ tile and any split-K per call:
 - **`matmul_ogs` for prefill-size expert GEMMs.** Above 2048 routed rows, triton_kernels' ragged
     `matmul_ogs` (split-K pinned to 1) gives VeOmni's bits at 400–530 TFLOP/s where VeOmni's kernel
     stays near 200: the MoE layer is 1.30–1.71× faster at T = 2048–8192.
+- **Inference-only fused MoE forward.** With autograd off, the token gather is fused into fc1's
+    loads and `silu(gate) * up * gate_weight` runs as one Triton pass. That pass must replay VeOmni's
+    three bf16 roundings with IEEE `expf` and division: a single fp32 chain with one rounding (as
+    DeepGEMM's Mega MoE does) mismatches 33% of outputs. MoE layer 1.33–2.10× over VeOmni as shipped.
 
 ## Acknowledgements
 
