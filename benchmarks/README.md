@@ -222,15 +222,22 @@ vexact with async scheduling). Output tokens/s:
 
 | model / workload       | vexact | vLLM batch-invariant | vLLM default |
 | ---------------------- | -----: | -------------------: | -----------: |
-| Qwen3-8B GSM8K         | 13,324 |               13,892 |       16,690 |
-| Qwen3-8B ShareGPT      |  8,424 |                6,910 |       11,122 |
-| Qwen3-30B-A3B GSM8K    |  5,784 |                6,080 |        7,795 |
-| Qwen3-30B-A3B ShareGPT |  4,390 |                4,425 |        5,806 |
+| Qwen3-8B GSM8K         | 13,976 |               13,892 |       16,690 |
+| Qwen3-8B ShareGPT      |  8,490 |                6,910 |       11,122 |
+| Qwen3-30B-A3B GSM8K    |  5,807 |                6,080 |        7,795 |
+| Qwen3-30B-A3B ShareGPT |  4,497 |                4,425 |        5,806 |
 
-vLLM's batch-invariant mode makes vLLM consistent with itself, not with a training engine. Per
-decode step on Qwen3-8B at 512 sequences, the remaining gap to it is attention (vLLM's FA3 build is
-~27% faster per call, also with `num_splits=1`) and unfused q/k/v and gate/up projections (7
-matmuls per layer vs 4).
+vLLM's batch-invariant mode makes vLLM consistent with itself, not with a training engine. vexact is
+at 0.96–1.23× of it and 0.74–0.84× of vLLM's default mode. The 4-stage tile and the fused projections
+are worth +4.9% on Qwen3-8B GSM8K but only +0.4% on Qwen3-30B-A3B GSM8K, where every layer is MoE: its
+experts already hold merged gate/up weights, so only q/k/v is fused there.
+
+Per decode step on Qwen3-8B at 512 sequences, what is left against vLLM's default mode is attention
+(vLLM's FA3 fork picks a 64-row query tile with one consumer warpgroup when the query rows per KV head
+are ≤ 64, which is 14–27% faster per decode call and returns the same bits) and GEMM: cuBLAS still wins
+by a margin that tile choice alone does not close, since at decode it splits K per batch size. A static
+K split chosen from (N, K) only is the invariant substitute and reaches cuBLAS at small M on narrow
+layers, but its tree costs 5–12% at prefill sizes, so it is not a net win as a single kernel.
 
 ## Acknowledgements
 
