@@ -36,10 +36,17 @@ class BatchExecutionDescriptor:
     `num_tokens` is the padded token bucket. `num_seqs` is the padded sequence
     count. A descriptor can replay any runtime batch with no more tokens or
     sequences than these limits.
+
+    `max_seqlen_q` is the longest query run in any batch the graph may serve. Attention takes it as a host
+    integer, so capture bakes it in; it must therefore be an upper bound for every such batch. The general
+    descriptors use the whole token bucket. A pure decode step has one token per sequence, so the decode
+    descriptors (`num_tokens == num_seqs`, dispatched only when the batch has one token per sequence) can use
+    1, which is what lets vLLM's FA3 build pick its one-warpgroup decode tile.
     """
 
     num_tokens: int
     num_seqs: int
+    max_seqlen_q: int
 
 
 class CudaGraphManager:
@@ -81,8 +88,15 @@ class CudaGraphManager:
             BatchExecutionDescriptor(
                 num_tokens=capture_size,
                 num_seqs=min(capture_size, self.input_buffers.max_num_seqs),
+                max_seqlen_q=capture_size,
             )
             for capture_size in self.capture_sizes
+        ]
+        # One token per sequence. Size 1 is already covered by the general descriptor of the same shape.
+        self._decode_descriptors = [
+            BatchExecutionDescriptor(num_tokens=size, num_seqs=size, max_seqlen_q=1)
+            for size in self.capture_sizes
+            if 1 < size <= self.input_buffers.max_num_seqs
         ]
 
     @staticmethod
@@ -100,10 +114,14 @@ class CudaGraphManager:
     def capture_graphs(self) -> None:
         if not self.capture_sizes:
             raise RuntimeError("CudaGraphManger capture sizes are not set.")
-        for desc in self._descriptors:
+        for desc in self._descriptors + self._decode_descriptors:
             self.capture(desc)
 
     def dispatch(self, num_seqs: int, total_tokens: int) -> BatchExecutionDescriptor | None:
+        if total_tokens == num_seqs:  # one token per sequence: a pure decode step
+            for desc in self._decode_descriptors:
+                if desc.num_seqs >= num_seqs:
+                    return desc
         for desc in self._descriptors:
             if desc.num_seqs >= num_seqs and desc.num_tokens >= total_tokens:
                 return desc
@@ -169,7 +187,7 @@ class CudaGraphManager:
             context_lens=context_lens,
             slot_mapping=slot_mapping,
             query_start_loc=query_start_loc,
-            max_seqlen_q=capture_tokens,
+            max_seqlen_q=desc.max_seqlen_q,
         )
         _ = self.model(**static_inputs, **self.forward_kwargs)
 

@@ -22,6 +22,15 @@ import triton.profiler as proton
 from vexact.batch_invariant_ops.kv_cache_context import store_kvcache
 
 
+try:
+    # vLLM ships its own FA3 build (the `vllm` extra). Its decode heuristic picks a 64-row query tile with one
+    # consumer warpgroup when the query rows per KV head are <= 64, which is 1.14-1.27x faster per paged decode
+    # call than the upstream build and returns the same bits (tests/batch_invariant_ops/test_flash_attention.py).
+    from vllm.vllm_flash_attn import flash_attn_varlen_func as _vllm_flash_attn_varlen_func
+except ImportError:
+    _vllm_flash_attn_varlen_func = None
+
+
 def _get_fa_window_size(sliding_window: Optional[int]) -> tuple[int, int]:
     """Translate a Transformers causal window into FlashAttention boundaries."""
     if sliding_window is None:
@@ -187,24 +196,42 @@ def flash_attention_forward(
         )
     else:
         assert DEVICE_MAJOR == 9, f"FA3 requires SM90, got SM{DEVICE_MAJOR}0"
-        from flash_attn_interface import flash_attn_with_kvcache
-
         window_size = _get_fa_window_size(sliding_window)
-        attn_output = flash_attn_with_kvcache(
-            query_flat,
-            key_cache_blocks,
-            value_cache_blocks,
-            cu_seqlens_q=cu_seqlens_q,
-            # cu_seqlens_k=cu_seqlens_k,
-            cache_seqlens=context_lens,
-            max_seqlen_q=max_seqlen_q,
-            # max_seqlen_k=max_seqlen_k,
-            softmax_scale=scaling,
-            causal=True,
-            page_table=block_tables,
-            window_size=window_size,
-            num_splits=1,
-        )
+        if _vllm_flash_attn_varlen_func is not None:
+            # max_seqlen_k only bounds the kernel's scheduling; each sequence's length comes from seqused_k. The
+            # block table's capacity is such a bound, it costs no device-to-host copy, and it is constant, so it
+            # is safe to bake into a CUDA graph (measured: same bits and same speed as the exact value).
+            attn_output = _vllm_flash_attn_varlen_func(
+                q=query_flat,
+                k=key_cache_blocks,
+                v=value_cache_blocks,
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                seqused_k=context_lens,
+                max_seqlen_k=block_tables.shape[1] * key_cache_blocks.shape[1],
+                softmax_scale=scaling,
+                causal=True,
+                window_size=window_size,
+                block_table=block_tables,
+                num_splits=1,
+                fa_version=3,
+            )
+        else:
+            from flash_attn_interface import flash_attn_with_kvcache
+
+            attn_output = flash_attn_with_kvcache(
+                query_flat,
+                key_cache_blocks,
+                value_cache_blocks,
+                cu_seqlens_q=cu_seqlens_q,
+                cache_seqlens=context_lens,
+                max_seqlen_q=max_seqlen_q,
+                softmax_scale=scaling,
+                causal=True,
+                page_table=block_tables,
+                window_size=window_size,
+                num_splits=1,
+            )
     # Output shape: (H, total_query_tokens, D)
     return attn_output, None
 

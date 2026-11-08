@@ -160,39 +160,48 @@ tile and any split-K per call:
     clamped to row 0, which made M < BLOCK_M 3–4.5× slower; they are now masked. The bf16 tile is
     picked per shape from 5 candidates by the model above, with constants fitted to measured times
     (0.13% geomean regret). Decode sizes (M ≤ 64) are 2.2–5× faster, prefill sizes 1.1–1.4×.
+
 - **LM head on sampled rows only.** Rollout ran `lm_head` on every packed token, prefill chunks and
     CUDA-graph padding included, then kept one row per request. It now passes each request's last row
     as `logits_to_keep`. About 2.5 TFLOP saved on a 4096-token mixed step of Qwen3-1.7B.
+
 - **MoE expert GEMM launches.** VeOmni ships no tuned configs, so every expert GEMM ran a fallback
     128×128×32 tile. Launching the same kernel with a tile chosen by routed-row count reaches the
     weight-streaming bound at decode: the MoE layer is 1.16–1.45× faster for T ≤ 512 tokens
     (Qwen3-30B-A3B shapes).
+
 - **`matmul_ogs` for prefill-size expert GEMMs.** Above 2048 routed rows, triton_kernels' ragged
     `matmul_ogs` (split-K pinned to 1) gives VeOmni's bits at 400–530 TFLOP/s where VeOmni's kernel
     stays near 200: the MoE layer is 1.30–1.71× faster at T = 2048–8192.
+
 - **Inference-only fused MoE forward.** With autograd off, the token gather is fused into fc1's
     loads and `silu(gate) * up * gate_weight` runs as one Triton pass. That pass must replay VeOmni's
     three bf16 roundings with IEEE `expf` and division: a single fp32 chain with one rounding (as
     DeepGEMM's Mega MoE does) mismatches 33% of outputs. MoE layer 1.33–2.10× over VeOmni as shipped.
+
 - **No NaN fill of `torch.empty`.** `torch.use_deterministic_algorithms(True)` also fills every
     uninitialized allocation with NaN: about 120 fill kernels per decode step, 9% of GPU time on the
     MoE rollout. Every kernel writes its outputs before they are read, so batch-invariant mode turns
     the fill off (1.07–1.08× end to end).
+
 - **Fused RMSNorm and RoPE** (no-grad calls on HF Qwen3 / Qwen3-MoE). RMSNorm is written in Gluon so
     each row is summed in exactly the layout of vexact's `mean_kernel`; a plain Triton kernel loads bf16
     8-wide and changes 30% of the variances. Intermediate bf16 roundings use integer bit operations,
     since Triton folds `.to(bf16).to(fp32)` in front of an add (6% of RoPE outputs changed). Row
     lengths are limited to multiples of 1024 or a single power-of-two block. +17–28% end to end on
     top of the earlier changes.
+
 - **Async scheduling** (`SchedulerConfig.async_scheduling`, off by default). The generation thread
     blocked on each step's `.cpu()` of sampled tokens, then built the next step while the GPU idled
     (GPU busy 84% of wall time). Step N+1 now launches before step N's tokens reach the host, with
     decode inputs copied on the GPU. Batch composition changes but, by batch invariance, no token does.
     1.21× on a 4096-request MoE rollout.
+
 - **Norm and RoPE at the bandwidth bound.** A 128-wide row in `mean_kernel`'s layout sits entirely in
     warp 0, so its sum is "4 values per lane in order, then a 32-lane butterfly"; a kernel that keeps
     exactly that while packing 16 rows per program takes the q/k norms from 235 to 46.5 µs (262k rows).
     RoPE runs one program per token over all heads: 159 → 48.9 µs (8192 tokens × 32 heads).
+
 - **MoE routing as a counting sort.** VeOmni orders routed rows with a histogram, a general stable
     `argsort` (multi-pass radix sort), an inverse scatter and a `cumsum`: ~40 µs per call at decode.
     Expert ids are small integers, so a stable counting sort gives the same permutation in three small
@@ -200,13 +209,16 @@ tile and any split-K per call:
     `expert * BLOCK + i`). 3.3–14× faster from 1 to 65,536 tokens. A first version scanned blocks in
     one program and lost to the radix sort above ~32k routed rows; parallelizing the prefix over
     expert columns and growing the block to 1024 rows fixed that without a fallback.
+
 - **Sampler.** With `top_p=1.0` (verl's default) the sampler still sorted the full vocabulary,
     then un-sorted it with `scatter`, which deterministic mode turns into a sorted `index_put`: 35 ms
     of a 66 ms decode step at 512 sequences. `top_p >= 1` now skips top-p, and real top-p un-sorts
     with a one-writer-per-element Triton kernel (14 ms, the vocabulary sort itself).
+
 - **4-stage GEMM tile.** The 128×128×64 tile with 4 pipeline stages instead of 3 is 5% faster per
     Qwen3-8B layer at M = 512 and gives the same bits; 3 stages remain where 4 do not fit shared
     memory. +2.5% end to end on a 512-request Qwen3-8B wave.
+
 - **Fused projections** (no-grad forwards). Each model declares which projections may be fused next to
     its other patches (q/k/v and gate/up for Qwen3 and Qwen3-MoE); their weights are concatenated once
     at model creation and the separate parameters become views of them, so loading and weight syncs fill
@@ -214,6 +226,13 @@ tile and any split-K per call:
     activations once per group. The batch-invariant matmul reduces each output column over K in the same
     order whatever N is, so the bits are unchanged and training, which keeps separate projections, stays
     aligned. +2.4% end to end on top of the tile change (+4.9% over the previous stack).
+
+- **vLLM's FA3 decode tile.** With the `vllm` extra installed, paged attention runs vLLM's FA3 build instead
+    of the upstream wheel. Its decode heuristic picks a 64-row query tile with one consumer warpgroup when the
+    query rows per KV head are at most 64, which is 1.14–1.27× faster per decode call and returns the same bits.
+    It only fires when attention is told the real query length, so pure-decode CUDA graphs are captured with
+    `max_seqlen_q = 1` (worth a further 1.08–1.15×) instead of the whole token bucket. `max_seqlen_k` may be any
+    upper bound, so it is the block table's capacity: constant, and therefore safe to bake into a graph.
 
 ### End to end vs vLLM
 

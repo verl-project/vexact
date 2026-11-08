@@ -175,3 +175,54 @@ def test_fa4_learnable_sink_matches_reference():
     expected = expected.transpose(1, 2).reshape_as(actual)
 
     torch.testing.assert_close(actual.float(), expected, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="FA3 requires CUDA")
+@pytest.mark.skipif(torch.cuda.is_available() and torch.cuda.get_device_capability()[0] != 9, reason="FA3 needs SM90")
+@pytest.mark.parametrize("max_seqlen_q", [1, 64])
+def test_vllm_fa3_matches_upstream_fa3(max_seqlen_q):
+    """vexact prefers vLLM's FA3 build when the `vllm` extra is installed: it must return the same bits as the
+    upstream wheel, including with the max_seqlen_q a pure-decode graph passes."""
+    vllm_fa = pytest.importorskip("vllm.vllm_flash_attn").flash_attn_varlen_func
+    from flash_attn_interface import flash_attn_with_kvcache
+
+    heads, kv_heads, head_dim, page, batch = 32, 8, 128, 256, 64
+    gen = torch.Generator(device="cuda").manual_seed(max_seqlen_q)
+    blocks_per_seq = 4
+    key_cache = torch.randn(batch * blocks_per_seq, page, kv_heads, head_dim, device="cuda", generator=gen).bfloat16()
+    value_cache = torch.randn_like(key_cache)
+    block_table = torch.randperm(key_cache.shape[0], device="cuda", generator=gen).view(batch, blocks_per_seq).int()
+    seqlens = torch.randint(300, 600, (batch,), device="cuda", generator=gen, dtype=torch.int32)
+    query = torch.randn(batch, heads, head_dim, device="cuda", generator=gen).bfloat16()
+    cu_seqlens_q = torch.arange(batch + 1, device="cuda", dtype=torch.int32)
+    scale = head_dim**-0.5
+
+    upstream = flash_attn_with_kvcache(
+        query,
+        key_cache,
+        value_cache,
+        cu_seqlens_q=cu_seqlens_q,
+        cache_seqlens=seqlens,
+        max_seqlen_q=max_seqlen_q,
+        softmax_scale=scale,
+        causal=True,
+        page_table=block_table,
+        num_splits=1,
+    )
+    # max_seqlen_k may be any upper bound; vexact passes the block table's capacity.
+    fused = vllm_fa(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=max_seqlen_q,
+        seqused_k=seqlens,
+        max_seqlen_k=blocks_per_seq * page,
+        softmax_scale=scale,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=block_table,
+        num_splits=1,
+        fa_version=3,
+    )
+    assert torch.equal(fused.view(torch.int16), upstream.view(torch.int16))
