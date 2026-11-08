@@ -200,6 +200,27 @@ tile and any split-K per call:
     `expert * BLOCK + i`). 3.3–14× faster from 1 to 65,536 tokens. A first version scanned blocks in
     one program and lost to the radix sort above ~32k routed rows; parallelizing the prefix over
     expert columns and growing the block to 1024 rows fixed that without a fallback.
+- **Sampler.** With `top_p=1.0` (verl's default) the sampler still sorted the full vocabulary,
+    then un-sorted it with `scatter`, which deterministic mode turns into a sorted `index_put`: 35 ms
+    of a 66 ms decode step at 512 sequences. `top_p >= 1` now skips top-p, and real top-p un-sorts
+    with a one-writer-per-element Triton kernel (14 ms, the vocabulary sort itself).
+
+### End to end vs vLLM
+
+vLLM 0.19.1, one H100, same token workloads (EOS ignored, temperature 1, KV cache capped equally;
+vexact with async scheduling). Output tokens/s:
+
+| model / workload       | vexact | vLLM batch-invariant | vLLM default |
+| ---------------------- | -----: | -------------------: | -----------: |
+| Qwen3-8B GSM8K         | 13,324 |               13,892 |       16,690 |
+| Qwen3-8B ShareGPT      |  8,424 |                6,910 |       11,122 |
+| Qwen3-30B-A3B GSM8K    |  5,784 |                6,080 |        7,795 |
+| Qwen3-30B-A3B ShareGPT |  4,390 |                4,425 |        5,806 |
+
+vLLM's batch-invariant mode makes vLLM consistent with itself, not with a training engine. Per
+decode step on Qwen3-8B at 512 sequences, the remaining gap to it is attention (vLLM's FA3 build is
+~27% faster per call, also with `num_splits=1`) and unfused q/k/v and gate/up projections (7
+matmuls per layer vs 4).
 
 ## Acknowledgements
 
