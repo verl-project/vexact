@@ -25,13 +25,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.activations import ACT2FN
 from transformers.models.qwen3_moe.modeling_qwen3_moe import (
+    Qwen3MoeAttention,
     Qwen3MoeConfig,
     Qwen3MoeForCausalLM,
     Qwen3MoeForSequenceClassification,
     Qwen3MoeForTokenClassification,
+    Qwen3MoeMLP,
     Qwen3MoePreTrainedModel,
     Qwen3MoeSparseMoeBlock,
 )
+
+from vexact.models.fused_projections import register_fused_attention, register_fused_mlp
 
 
 logger = logging.getLogger(__name__)
@@ -297,6 +301,11 @@ def apply_qwen3_moe_patches() -> None:
     Qwen3MoePreTrainedModel.load_weights = load_qwen3_moe_weights
     Qwen3MoeSparseMoeBlock.__init__ = moe_block_init
     Qwen3MoeSparseMoeBlock.forward = moe_block_forward
+
+    # Projections vexact may fuse for inference (see fused_projections). The experts already hold merged
+    # gate/up weights, so only the dense MLP of mlp_only_layers declares that group.
+    register_fused_attention(Qwen3MoeAttention)  # q_proj, k_proj, v_proj
+    register_fused_mlp(Qwen3MoeMLP)  # gate_proj, up_proj
 
     logger.info("Applied Qwen3-MoE monkey patches.")
     _PATCHED = True

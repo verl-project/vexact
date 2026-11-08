@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fused QKV / gate-up projections must give the bits of the separate ones and follow weight syncs."""
+"""Fused projections must give the bits of the separate ones, follow weight syncs, and stay opt-in per model."""
 
 import copy
 
@@ -21,7 +21,9 @@ import torch
 from transformers import AutoModelForCausalLM, Qwen3Config, Qwen3MoeConfig
 
 from vexact.batch_invariant_ops import set_batch_invariant_mode
-from vexact.models.fused_projections import apply_fused_projection_patches, fuse_projections
+from vexact.models.fused_projections import GATE_UP, QKV, fuse_projections
+from vexact.models.qwen3.modeling_qwen3 import apply_qwen3_patches
+from vexact.models.qwen3_moe.modeling_qwen3_moe import apply_qwen3_moe_patches
 
 
 if not torch.cuda.is_available():
@@ -49,6 +51,8 @@ def _config(kind: str, bias: bool):
 
 
 def _models(kind: str, bias: bool):
+    apply_qwen3_patches()
+    apply_qwen3_moe_patches()
     torch.manual_seed(0)
     model = AutoModelForCausalLM.from_config(_config(kind, bias)).to("cuda", torch.bfloat16).eval()
     with torch.no_grad():
@@ -56,7 +60,6 @@ def _models(kind: str, bias: bool):
             p.normal_(0, 0.05)
     fused = copy.deepcopy(model)
     assert fuse_projections(fused) == 4  # 2 layers x (attention + MLP)
-    apply_fused_projection_patches()
     return model, fused
 
 
@@ -84,7 +87,7 @@ def test_weight_sync_writes_into_fused_weight(kind):
             dict(model.named_parameters())[name].copy_(value)
             fused_params[name].copy_(value)
     attn = fused.model.layers[0].self_attn
-    weight = attn._vexact_fused[0]
+    weight = attn._vexact_fused[QKV][0]
     assert attn.q_proj.weight.data_ptr() == weight.data_ptr()
     assert torch.equal(weight[: attn.q_proj.out_features], new["model.layers.0.self_attn.q_proj.weight"])
     ids = torch.randint(0, 1024, (1, 64), device="cuda")
@@ -99,3 +102,16 @@ def test_grad_enabled_calls_use_separate_projections():
         ref = model(input_ids=ids).logits
     assert out.requires_grad
     assert torch.equal(out.detach().view(torch.int16), ref.detach().view(torch.int16))
+
+
+@pytest.mark.parametrize("kind", ["qwen3", "qwen3_moe"])
+def test_declared_groups_and_unfused_model_uses_hf_forward(kind):
+    """The fused path is opt-in: a model that was never fused keeps the model's own forward."""
+    model, _ = _models(kind, bias=False)
+    layer = model.model.layers[0]
+    assert type(layer.self_attn)._vexact_fuse_groups == (QKV,)
+    assert type(layer.mlp)._vexact_fuse_groups == (GATE_UP,)
+    assert not hasattr(layer.self_attn, "_vexact_fused")
+    ids = torch.randint(0, 1024, (1, 32), device="cuda")
+    with torch.no_grad(), set_batch_invariant_mode(True):
+        assert model(input_ids=ids).logits.isfinite().all()

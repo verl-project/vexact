@@ -207,13 +207,13 @@ tile and any split-K per call:
 - **4-stage GEMM tile.** The 128×128×64 tile with 4 pipeline stages instead of 3 is 5% faster per
     Qwen3-8B layer at M = 512 and gives the same bits; 3 stages remain where 4 do not fit shared
     memory. +2.5% end to end on a 512-request Qwen3-8B wave.
-- **Fused QKV and gate/up projections** (no-grad Qwen3 / Qwen3-MoE forwards). The weights of each
-    q/k/v and gate/up group are concatenated once at model creation and the separate parameters become
-    views of them, so loading and weight syncs fill the fused weight in place. Rollout then runs 4
-    GEMMs per layer instead of 7, reading the activations once per group. The batch-invariant matmul
-    reduces each output column over K in the same order whatever N is, so the bits are unchanged and
-    training, which keeps separate projections, stays aligned. +2.4% end to end on top of the tile
-    change (+4.9% over the previous stack).
+- **Fused projections** (no-grad forwards). Each model declares which projections may be fused next to
+    its other patches (q/k/v and gate/up for Qwen3 and Qwen3-MoE); their weights are concatenated once
+    at model creation and the separate parameters become views of them, so loading and weight syncs fill
+    the fused weight in place. Rollout then runs 4 GEMMs per dense layer instead of 7, reading the
+    activations once per group. The batch-invariant matmul reduces each output column over K in the same
+    order whatever N is, so the bits are unchanged and training, which keeps separate projections, stays
+    aligned. +2.4% end to end on top of the tile change (+4.9% over the previous stack).
 
 ### End to end vs vLLM
 

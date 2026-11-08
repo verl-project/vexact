@@ -307,9 +307,10 @@ class ModelCreator:
         # state_dict naming evolves across transformers releases).
         with TorchMemorySaverAdapter.get_instance().region("weights", enable_cpu_backup=True):
             init_parameters(self._causal_model, self._config.dtype, self._device)
-            # One weight per q/k/v and gate/up group, inside the weights region; loading fills it in place.
+            # One weight per group the model declares fusable, inside the weights region; loading fills it
+            # in place (see vexact/models/fused_projections.py).
             fused = fuse_projections(self._causal_model)
-            logger.info(f"[VEXACT] fused q/k/v and gate/up weights of {fused} modules")
+            logger.info(f"[VEXACT] fused {fused} declared projection groups")
 
         load_weights_from_weight_path(self._causal_model, self._config, self._model_path)
 

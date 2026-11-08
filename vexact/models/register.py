@@ -75,11 +75,10 @@ def register_models() -> None:
         apply_fused_norm_rope_patches()
         print("[VEXACT] register_models(): fused RMSNorm/RoPE for inference (Qwen3, Qwen3-MoE)")
 
-        # One GEMM for q/k/v and for gate/up in no-grad forwards (weights fused at model creation).
-        from vexact.models.fused_projections import apply_fused_projection_patches
+        from .qwen3.modeling_qwen3 import apply_qwen3_patches
 
-        apply_fused_projection_patches()
-        print("[VEXACT] register_models(): fused QKV and gate/up projections for inference (Qwen3, Qwen3-MoE)")
+        apply_qwen3_patches()
+        print("[VEXACT] register_models(): Qwen3 monkey patch active")
 
         from .qwen3_moe.modeling_qwen3_moe import apply_qwen3_moe_patches
 
