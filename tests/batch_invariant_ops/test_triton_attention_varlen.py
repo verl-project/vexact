@@ -644,3 +644,12 @@ def test_decodes_of_a_mixed_batch_match_their_own_prefill(num_heads, num_kv_head
     for i in (1, 2):
         full = _run_paged([q_seqs[i]], [k_seqs[i]], [v_seqs[i]], page_size)
         assert torch.equal(mixed[kv_lens[0] + i - 1].view(torch.int16), full[-1].view(torch.int16))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Paged attention requires CUDA")
+def test_short_decode_tile_is_off_by_default():
+    """The short tile is a benchmarking switch: it is faster but does not keep the general kernel's bits, so
+    the default must stay on the tile height that does."""
+    from vexact.batch_invariant_ops import triton_invariant_attention as tia
+
+    assert tia._SHORT_DECODE_TILE is False

@@ -14,6 +14,7 @@
 
 # Triton packed and paged varlen attention for batch-invariant rollout.
 
+import os
 from typing import Optional
 
 import torch
@@ -22,6 +23,15 @@ import triton
 import triton.language as tl
 
 from vexact.batch_invariant_ops.kv_cache_context import get_kv_cache_context, store_kvcache
+
+
+# Benchmarking only, and off by default. The decode kernel's tile height is what keeps its bits equal to the
+# general kernel's: both make tl.dot emit the same MMA instruction over head_dim. A tile sized to the query
+# group instead is 1.9-9.6x faster per decode call and takes a Qwen3-8B GSM8K run to 14,488 output tok/s
+# against FA3's 14,012, but it changes those bits, so training, which computes the same tokens in the general
+# kernel's taller tiles, no longer matches rollout. Using it for real would mean moving both kernels to one
+# canonical tile shape and re-establishing the bitwise guarantee.
+_SHORT_DECODE_TILE = os.environ.get("VEXACT_ATTN_SHORT_DECODE_TILE", "0") == "1"
 
 
 def _require_cuda(name: str, tensor: torch.Tensor) -> None:
@@ -847,7 +857,7 @@ class _PagedFlashAttentionVarlen(torch.autograd.Function):
         # the general kernel below skips them. The tile keeps the general kernel's height so tl.dot emits the
         # same MMA instruction over the same head_dim order; a shorter tile is faster but changes the bits.
         if seqused_k.numel() > 0:
-            block_h = block_m
+            block_h = max(16, triton.next_power_of_2(q.shape[1] // k.shape[2])) if _SHORT_DECODE_TILE else block_m
             _paged_attn_decode_kernel[(seqused_k.numel(), k.shape[2])](
                 q,
                 k,
