@@ -207,6 +207,13 @@ tile and any split-K per call:
 - **4-stage GEMM tile.** The 128×128×64 tile with 4 pipeline stages instead of 3 is 5% faster per
     Qwen3-8B layer at M = 512 and gives the same bits; 3 stages remain where 4 do not fit shared
     memory. +2.5% end to end on a 512-request Qwen3-8B wave.
+- **Fused projections** (no-grad forwards). Each model declares which projections may be fused next to
+    its other patches (q/k/v and gate/up for Qwen3 and Qwen3-MoE); their weights are concatenated once
+    at model creation and the separate parameters become views of them, so loading and weight syncs fill
+    the fused weight in place. Rollout then runs 4 GEMMs per dense layer instead of 7, reading the
+    activations once per group. The batch-invariant matmul reduces each output column over K in the same
+    order whatever N is, so the bits are unchanged and training, which keeps separate projections, stays
+    aligned. +2.4% end to end on top of the tile change (+4.9% over the previous stack).
 
 ### End to end vs vLLM
 
@@ -215,15 +222,22 @@ vexact with async scheduling). Output tokens/s:
 
 | model / workload       | vexact | vLLM batch-invariant | vLLM default |
 | ---------------------- | -----: | -------------------: | -----------: |
-| Qwen3-8B GSM8K         | 13,324 |               13,892 |       16,690 |
-| Qwen3-8B ShareGPT      |  8,424 |                6,910 |       11,122 |
-| Qwen3-30B-A3B GSM8K    |  5,784 |                6,080 |        7,795 |
-| Qwen3-30B-A3B ShareGPT |  4,390 |                4,425 |        5,806 |
+| Qwen3-8B GSM8K         | 13,976 |               13,892 |       16,690 |
+| Qwen3-8B ShareGPT      |  8,490 |                6,910 |       11,122 |
+| Qwen3-30B-A3B GSM8K    |  5,807 |                6,080 |        7,795 |
+| Qwen3-30B-A3B ShareGPT |  4,497 |                4,425 |        5,806 |
 
-vLLM's batch-invariant mode makes vLLM consistent with itself, not with a training engine. Per
-decode step on Qwen3-8B at 512 sequences, the remaining gap to it is attention (vLLM's FA3 build is
-~27% faster per call, also with `num_splits=1`) and unfused q/k/v and gate/up projections (7
-matmuls per layer vs 4).
+vLLM's batch-invariant mode makes vLLM consistent with itself, not with a training engine. vexact is
+at 0.96–1.23× of it and 0.74–0.84× of vLLM's default mode. The 4-stage tile and the fused projections
+are worth +4.9% on Qwen3-8B GSM8K but only +0.4% on Qwen3-30B-A3B GSM8K, where every layer is MoE: its
+experts already hold merged gate/up weights, so only q/k/v is fused there.
+
+Per decode step on Qwen3-8B at 512 sequences, what is left against vLLM's default mode is attention
+(vLLM's FA3 fork picks a 64-row query tile with one consumer warpgroup when the query rows per KV head
+are ≤ 64, which is 14–27% faster per decode call and returns the same bits) and GEMM: cuBLAS still wins
+by a margin that tile choice alone does not close, since at decode it splits K per batch size. A static
+K split chosen from (N, K) only is the invariant substitute and reaches cuBLAS at small M on narrow
+layers, but its tree costs 5–12% at prefill sizes, so it is not a net win as a single kernel.
 
 ## Acknowledgements
 

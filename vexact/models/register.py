@@ -75,6 +75,11 @@ def register_models() -> None:
         apply_fused_norm_rope_patches()
         print("[VEXACT] register_models(): fused RMSNorm/RoPE for inference (Qwen3, Qwen3-MoE)")
 
+        from .qwen3.modeling_qwen3 import apply_qwen3_patches
+
+        apply_qwen3_patches()
+        print("[VEXACT] register_models(): Qwen3 monkey patch active")
+
         from .qwen3_moe.modeling_qwen3_moe import apply_qwen3_moe_patches
 
         apply_qwen3_moe_patches()
