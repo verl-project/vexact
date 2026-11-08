@@ -852,6 +852,12 @@ def enable_batch_invariant_mode():
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
     torch.use_deterministic_algorithms(True, warn_only=False)
+    # With deterministic algorithms on, PyTorch by default fills every torch.empty / empty_like
+    # allocation with NaN so that reads of uninitialized memory are reproducible. Every kernel here
+    # writes its outputs before they are read, so the fill only costs time: ~120 extra fill kernels
+    # per decode step on Qwen3-30B-A3B (8 layers), ~9% of GPU time. Results are unchanged (generation
+    # regression test and the training-vs-rollout verifier).
+    torch.utils.deterministic.fill_uninitialized_memory = False
     torch.backends.cudnn.deterministic = True
 
 
