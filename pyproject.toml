@@ -23,6 +23,9 @@ gpu = [
     "flash-attn-4",
     "quack-kernels==0.3.4",
     "nvidia-ml-py",
+    # Ragged grouped matmul (matmul_ogs) for the fused-MoE expert GEMMs at prefill sizes.
+    # Must match the installed Triton; see [tool.uv.sources].
+    "triton-kernels",
 ]
 dev = [
     "pytest",
@@ -140,6 +143,8 @@ veomni = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "aa8bb43c
 torch = [
     { index = "pytorch", extra = "gpu" },
 ]
+# triton_kernels is not published on PyPI; take it from the Triton tag matching torch 2.10's Triton 3.6.
+triton-kernels = { git = "https://github.com/triton-lang/triton.git", tag = "v3.6.0", subdirectory = "python/triton_kernels" }
 torchvision = { index = "pytorch" }
 torchaudio = { index = "pytorch" }
 flash-attn = { url = "https://github.com/Luosuu/flash-attention3-wheels/releases/download/v0.0.2/flash_attn-2.8.4+cu129torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
