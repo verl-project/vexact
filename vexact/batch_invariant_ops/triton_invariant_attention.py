@@ -478,12 +478,12 @@ def _paged_attn_fwd_block_kernel(
     causal: tl.constexpr,
     BF16_OUTPUT: tl.constexpr,
     FP32_OUTPUT: tl.constexpr,
+    SKIP_DECODE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
     seq_id = tl.program_id(0)
-    start_m = tl.program_id(1)
     q_head = tl.program_id(2)
     kv_head = q_head // (num_q_heads // num_kv_heads)
 
@@ -492,6 +492,12 @@ def _paged_attn_fwd_block_kernel(
     q_len = q_end - q_start
     kv_len = tl.load(SEQUSED_K + seq_id)
     q_abs_start = kv_len - q_len
+    # Walk this sequence's own query blocks. They are still 128-aligned, so each tile covers the same absolute
+    # positions as before and the bits do not change, but the grid no longer spans the whole KV capacity: a
+    # mixed step used to launch a program per 128 positions of capacity per head, nearly all of them exiting.
+    start_m = (q_abs_start // BLOCK_M) + tl.program_id(1)
+    if SKIP_DECODE and q_len == 1:
+        return  # handled by _paged_attn_decode_kernel, which reads each KV head once for all its query heads
     if start_m * BLOCK_M >= kv_len or (start_m + 1) * BLOCK_M <= q_abs_start:
         return
 
@@ -616,6 +622,181 @@ def _paged_attn_fwd_block_kernel(
     )
 
 
+@triton.jit
+def _paged_attn_decode_kernel(
+    Q,
+    K,
+    V,
+    OUT,
+    CU_SEQLENS_Q,
+    SEQUSED_K,
+    PAGE_TABLE,
+    stride_qt: tl.constexpr,
+    stride_qh: tl.constexpr,
+    stride_qd: tl.constexpr,
+    stride_kb: tl.constexpr,
+    stride_kp: tl.constexpr,
+    stride_kh: tl.constexpr,
+    stride_kd: tl.constexpr,
+    stride_vb: tl.constexpr,
+    stride_vp: tl.constexpr,
+    stride_vh: tl.constexpr,
+    stride_vd: tl.constexpr,
+    stride_ot: tl.constexpr,
+    stride_oh: tl.constexpr,
+    stride_od: tl.constexpr,
+    page_table_stride_b: tl.constexpr,
+    page_table_stride_p: tl.constexpr,
+    softmax_scale: tl.constexpr,
+    page_size: tl.constexpr,
+    num_q_heads: tl.constexpr,
+    num_kv_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    value_head_dim: tl.constexpr,
+    BF16_OUTPUT: tl.constexpr,
+    FP32_OUTPUT: tl.constexpr,
+    BAND_M: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    """One query token per sequence: the query heads that share a KV head are one tile, so each program reads
+    that head's KV once instead of once per query head, and only the programs with work are launched.
+
+    Every output row still reduces over the same KV positions in the same BLOCK_N order, with the same two
+    stages (unmasked blocks below the query's 128-aligned band, then the band itself) and the same arithmetic
+    as _paged_attn_fwd_block_kernel, so the results are bit for bit the same. The blocks that kernel runs past
+    the sequence contribute exactly zero (their logits are masked to -1e6, so p underflows to 0 and neither
+    m_i nor l_i moves), which is why stopping at the band's end is equivalent.
+    """
+    seq_id = tl.program_id(0)
+    kv_head = tl.program_id(1)
+    GROUP: tl.constexpr = num_q_heads // num_kv_heads
+
+    q_start = tl.load(CU_SEQLENS_Q + seq_id)
+    q_len = tl.load(CU_SEQLENS_Q + seq_id + 1) - q_start
+    kv_len = tl.load(SEQUSED_K + seq_id)
+    if q_len != 1 or kv_len <= 0:
+        return  # the general kernel takes the sequences with more than one query token
+    pos = kv_len - 1  # the one query token sits at the end of the sequence
+    start_m = pos // BAND_M
+
+    offs_h = tl.arange(0, BLOCK_H)
+    offs_d = tl.arange(0, BLOCK_D)
+    valid_h = offs_h < GROUP
+    q_head = kv_head * GROUP + offs_h
+    q = tl.load(
+        Q + q_start * stride_qt + q_head[:, None] * stride_qh + offs_d[None, :] * stride_qd,
+        mask=valid_h[:, None] & (offs_d[None, :] < head_dim),
+        other=0.0,
+    )
+
+    if BF16_OUTPUT:
+        dtype = tl.bfloat16
+    elif FP32_OUTPUT:
+        dtype = tl.float32
+    else:
+        dtype = tl.float16
+
+    qk_scale = softmax_scale * 1.44269504
+    m_i = tl.zeros([BLOCK_H], dtype=tl.float32) - float("inf")
+    l_i = tl.zeros([BLOCK_H], dtype=tl.float32) + 1.0
+    acc = tl.zeros((BLOCK_H, BLOCK_D), dtype=tl.float32)
+
+    # Stage 1 and stage 2 are separate loops, as in _paged_attn_fwd_block_kernel: one loop with a branch
+    # inside compiles differently and changed the last bit of the 256-deep MLA dot (measured).
+    start_n = 0
+    while start_n < start_m * BAND_M:
+        offs_n = start_n + tl.arange(0, BLOCK_N)
+        valid_n = offs_n < kv_len
+        logical_page = tl.where(valid_n, offs_n // page_size, 0)
+        page_offset = tl.where(valid_n, offs_n - logical_page * page_size, 0)
+        physical_page = tl.load(
+            PAGE_TABLE + seq_id * page_table_stride_b + logical_page * page_table_stride_p,
+            mask=valid_n,
+            other=-1,
+        )
+        k = tl.load(
+            K
+            + physical_page[:, None] * stride_kb
+            + page_offset[:, None] * stride_kp
+            + kv_head * stride_kh
+            + offs_d[None, :] * stride_kd,
+            mask=valid_n[:, None] & (physical_page[:, None] >= 0) & (offs_d[None, :] < head_dim),
+            other=0.0,
+        )
+        qk = tl.dot(q, tl.trans(k))
+        m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
+        qk = qk * qk_scale - m_ij[:, None]
+        p = tl.math.exp2(qk)
+        alpha = tl.math.exp2(m_i - m_ij)
+        v_val = tl.load(
+            V
+            + physical_page[:, None] * stride_vb
+            + page_offset[:, None] * stride_vp
+            + kv_head * stride_vh
+            + offs_d[None, :] * stride_vd,
+            mask=valid_n[:, None] & (physical_page[:, None] >= 0) & (offs_d[None, :] < value_head_dim),
+            other=0.0,
+        )
+        p = p.to(dtype)
+        v_val = v_val.to(p.dtype)
+        acc = tl.dot(p, v_val, acc * alpha[:, None])
+        l_i = l_i * alpha + tl.sum(p, 1)
+        m_i = m_ij
+        start_n += BLOCK_N
+
+    start_n = start_m * BAND_M
+    while start_n < (start_m + 1) * BAND_M:
+        offs_n = start_n + tl.arange(0, BLOCK_N)
+        valid_n = offs_n < kv_len
+        logical_page = tl.where(valid_n, offs_n // page_size, 0)
+        page_offset = tl.where(valid_n, offs_n - logical_page * page_size, 0)
+        physical_page = tl.load(
+            PAGE_TABLE + seq_id * page_table_stride_b + logical_page * page_table_stride_p,
+            mask=valid_n,
+            other=-1,
+        )
+        k = tl.load(
+            K
+            + physical_page[:, None] * stride_kb
+            + page_offset[:, None] * stride_kp
+            + kv_head * stride_kh
+            + offs_d[None, :] * stride_kd,
+            mask=valid_n[:, None] & (physical_page[:, None] >= 0) & (offs_d[None, :] < head_dim),
+            other=0.0,
+        )
+        qk = tl.dot(q, tl.trans(k))
+        # Every row holds the same query position, so the causal mask is the same for all of them.
+        qk = qk * qk_scale + tl.where(pos >= offs_n, 0, -1.0e6)[None, :]
+        m_ij = tl.maximum(m_i, tl.max(qk, 1))
+        qk -= m_ij[:, None]
+        p = tl.math.exp2(qk)
+        alpha = tl.math.exp2(m_i - m_ij)
+        v_val = tl.load(
+            V
+            + physical_page[:, None] * stride_vb
+            + page_offset[:, None] * stride_vp
+            + kv_head * stride_vh
+            + offs_d[None, :] * stride_vd,
+            mask=valid_n[:, None] & (physical_page[:, None] >= 0) & (offs_d[None, :] < value_head_dim),
+            other=0.0,
+        )
+        p = p.to(dtype)
+        v_val = v_val.to(p.dtype)
+        acc = tl.dot(p, v_val, acc * alpha[:, None])
+        l_i = l_i * alpha + tl.sum(p, 1)
+        m_i = m_ij
+        start_n += BLOCK_N
+
+    out = acc / l_i[:, None]
+    tl.store(
+        OUT + q_start * stride_ot + q_head[:, None] * stride_oh + offs_d[None, :] * stride_od,
+        out.to(dtype),
+        mask=valid_h[:, None] & (offs_d[None, :] < value_head_dim),
+    )
+
+
 class _PagedFlashAttentionVarlen(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -630,7 +811,6 @@ class _PagedFlashAttentionVarlen(torch.autograd.Function):
         causal: bool,
         max_seqlen_q: int,
     ) -> torch.Tensor:
-        del max_seqlen_q
         _require_cuda("q", q)
         _require_cuda("k", k)
         _require_cuda("v", v)
@@ -662,8 +842,57 @@ class _PagedFlashAttentionVarlen(torch.autograd.Function):
         block_m = 128 if block_d <= 128 else 32
         block_n = 64 if block_m >= 64 else 32
 
-        max_seqlen_k = page_table.shape[1] * k.shape[1]
-        grid = (seqused_k.numel(), triton.cdiv(max_seqlen_k, block_m), q.shape[1])
+        # The sequences with one query token (a decode step, or the decodes of a mixed batch) go to a kernel
+        # that reads each KV head once for all of its query heads and launches only programs that have work;
+        # the general kernel below skips them. The tile keeps the general kernel's height so tl.dot emits the
+        # same MMA instruction over the same head_dim order; a shorter tile is faster but changes the bits.
+        if seqused_k.numel() > 0:
+            block_h = block_m
+            _paged_attn_decode_kernel[(seqused_k.numel(), k.shape[2])](
+                q,
+                k,
+                v,
+                o,
+                cu_seqlens_q,
+                seqused_k,
+                page_table,
+                q.stride(0),
+                q.stride(1),
+                q.stride(2),
+                k.stride(0),
+                k.stride(1),
+                k.stride(2),
+                k.stride(3),
+                v.stride(0),
+                v.stride(1),
+                v.stride(2),
+                v.stride(3),
+                o.stride(0),
+                o.stride(1),
+                o.stride(2),
+                page_table.stride(0),
+                page_table.stride(1),
+                softmax_scale=softmax_scale,
+                page_size=k.shape[1],
+                num_q_heads=q.shape[1],
+                num_kv_heads=k.shape[2],
+                head_dim=q.shape[-1],
+                value_head_dim=v.shape[-1],
+                BF16_OUTPUT=q.dtype == torch.bfloat16,
+                FP32_OUTPUT=q.dtype == torch.float32,
+                BAND_M=block_m,
+                BLOCK_H=block_h,
+                BLOCK_N=block_n,
+                BLOCK_D=block_d,
+                num_warps=4,
+                num_stages=3,
+            )
+
+        if max_seqlen_q == 1:
+            return o  # every sequence had one query token, so the decode kernel did all of the work
+
+        # One program per query block of the longest query run, plus one for a run straddling a boundary.
+        grid = (seqused_k.numel(), triton.cdiv(max_seqlen_q, block_m) + 1, q.shape[1])
         _paged_attn_fwd_block_kernel[grid](
             q,
             k,
@@ -697,6 +926,7 @@ class _PagedFlashAttentionVarlen(torch.autograd.Function):
             causal,
             BF16_OUTPUT=q.dtype == torch.bfloat16,
             FP32_OUTPUT=q.dtype == torch.float32,
+            SKIP_DECODE=True,
             BLOCK_M=block_m,
             BLOCK_N=block_n,
             BLOCK_D=block_d,
