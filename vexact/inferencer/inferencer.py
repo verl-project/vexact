@@ -197,7 +197,23 @@ class Inferencer:
 
         return final_output
 
-    def _prepare_gen_ctx(self, requests: Sequence[InferenceRequest]) -> GenerationContext:
+    def launch(self, requests: Sequence[InferenceRequest], prev_step: Optional["PendingStep"]) -> "PendingStep":
+        """Async scheduling (pipeline_parallel_size == 1): enqueue one step without waiting for the GPU.
+
+        Decode inputs that ``prev_step`` produced are read from its tokens on the GPU. Outputs are copied to
+        pinned host memory asynchronously; ``PendingStep.wait()`` blocks only until this step is done.
+        """
+        assert self._pp_info.pp_size == 1, "async scheduling requires pipeline_parallel_size == 1"
+        gen_ctx = self._prepare_gen_ctx(requests, prev_step)
+        outputs = self._forward(gen_ctx)
+        token_ids, logits, logprobs = self._select_tokens(
+            gen_ctx.generation_configs, gen_ctx.tokens_generated, outputs, gen_ctx
+        )
+        return PendingStep(list(requests), token_ids, logits, logprobs)
+
+    def _prepare_gen_ctx(
+        self, requests: Sequence[InferenceRequest], prev_step: Optional["PendingStep"] = None
+    ) -> GenerationContext:
         num_seqs = len(requests)
         max_blocks_per_req = self.input_buffers.max_blocks_per_req
 
@@ -267,6 +283,8 @@ class Inferencer:
         # Build input sequences # TODO: clean up position ids generation
         current_sequences: list[int] = []
         position_ids_sequences: list[np.ndarray] = []
+        pending_dst: list[int] = []  # positions in this batch whose token comes from prev_step on the GPU
+        pending_src: list[int] = []  # matching rows of prev_step.token_ids_gpu
         for idx, req in enumerate(requests):
             if req.num_computed_tokens - current_tokens[idx] < len(req.input_ids_list):
                 # Prefill (or re-prefill after preemption): feed the input tokens for this chunk
@@ -277,12 +295,31 @@ class Inferencer:
                 position_ids_sequences.append(np.arange(start_pos, end_pos, dtype=np.int64))
             else:
                 # Decode: feed the last generated token; position = num_computed_tokens - 1
-                last_token = req.generated_tokens[-1]
-                current_sequences.append(last_token)
+                pending_row = None
+                if prev_step is not None:
+                    pending_row = prev_step.token_row(req)
+                if pending_row is not None:
+                    # Async scheduling: the token comes from the previous step, still on the GPU.
+                    pending_dst.append(len(current_sequences))
+                    pending_src.append(pending_row)
+                    current_sequences.append(0)
+                else:
+                    current_sequences.append(req.generated_tokens[-1])
                 position_ids_sequences.append(np.array([req.num_computed_tokens - 1], dtype=np.int64))
 
-        batch_input_ids = torch.from_numpy(np.array(current_sequences, dtype=np.int64)).to(self.device).unsqueeze(0)
-        batch_position_ids = torch.from_numpy(np.concatenate(position_ids_sequences)).to(self.device).unsqueeze(0)
+        # non_blocking: a blocking host-to-device copy would wait for the in-flight step under async scheduling
+        batch_input_ids = (
+            torch.from_numpy(np.array(current_sequences, dtype=np.int64))
+            .to(self.device, non_blocking=True)
+            .unsqueeze(0)
+        )
+        batch_position_ids = (
+            torch.from_numpy(np.concatenate(position_ids_sequences)).to(self.device, non_blocking=True).unsqueeze(0)
+        )
+        if pending_dst:
+            dst = torch.tensor(pending_dst, dtype=torch.long).to(self.device, non_blocking=True)
+            src = torch.tensor(pending_src, dtype=torch.long).to(self.device, non_blocking=True)
+            batch_input_ids[0].index_copy_(0, dst, prev_step.token_ids_gpu.index_select(0, src))
 
         return GenerationContext(
             batch_input_ids=batch_input_ids,
@@ -467,3 +504,41 @@ class Inferencer:
 
         token_ids = batch_tokens.to(self.device)
         return token_ids, logits, logprobs
+
+
+class PendingStep:
+    """A launched step whose sampled tokens have not been read on the host yet (async scheduling)."""
+
+    def __init__(self, requests, token_ids, logits, logprobs):
+        def to_host(t):
+            host = torch.empty(t.shape, dtype=t.dtype, pin_memory=True)
+            host.copy_(t, non_blocking=True)
+            return host
+
+        self.requests = requests
+        self.token_ids_gpu = token_ids
+        self._out_cpu = InferencerOutput(
+            token_ids=to_host(token_ids), logits=to_host(logits), logprobs=to_host(logprobs)
+        )
+        self._event = torch.cuda.Event()
+        self._event.record()
+        # Per request, captured at launch: the scheduler may change both before this step is read back.
+        self.preempt_counts = [req.preempt_count for req in requests]
+        self.num_computed = [req.num_computed_tokens for req in requests]
+        # request_id -> (row in token_ids_gpu, preempt_count) for requests whose sampled token is generated output
+        self._rows = {
+            req.request_id: (i, req.preempt_count)
+            for i, req in enumerate(requests)
+            if req.num_computed_tokens >= len(req.input_ids_list)
+        }
+
+    def token_row(self, req) -> Optional[int]:
+        """Row of ``req``'s token from this step, if it produced one and the request was not preempted since."""
+        row = self._rows.get(req.request_id)
+        if row is None or row[1] != req.preempt_count:
+            return None
+        return row[0]
+
+    def wait(self) -> InferencerOutput:
+        self._event.synchronize()
+        return self._out_cpu

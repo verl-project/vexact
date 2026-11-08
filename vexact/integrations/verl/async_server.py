@@ -157,6 +157,8 @@ class VeXactServer:
                 max_num_seqs=self.config.max_num_seqs,
                 max_num_batched_tokens=self.config.max_num_batched_tokens,
                 enable_chunked_prefill=self.config.enable_chunked_prefill,
+                # Overlap host scheduling with GPU steps (pipeline_parallel_size == 1); results are unchanged.
+                async_scheduling=bool(engine_kwargs.get("async_scheduling", False)),
             ),
             driver=DriverConfig(
                 is_worker_proc_managed=True,
