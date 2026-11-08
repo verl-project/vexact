@@ -69,6 +69,12 @@ def register_models() -> None:
                 apply_rollout_fused_moe()
                 print("[VEXACT] register_models(): inference fused MoE forward active")
 
+        # Bit-exact fused RMSNorm / RoPE for no-grad calls (HF Qwen3, Qwen3-MoE).
+        from vexact.batch_invariant_ops.fused_norm_rope import apply_fused_norm_rope_patches
+
+        apply_fused_norm_rope_patches()
+        print("[VEXACT] register_models(): fused RMSNorm/RoPE for inference (Qwen3, Qwen3-MoE)")
+
         from .qwen3_moe.modeling_qwen3_moe import apply_qwen3_moe_patches
 
         apply_qwen3_moe_patches()
