@@ -21,7 +21,7 @@ import torch
 from transformers import AutoModelForCausalLM, Qwen3Config, Qwen3MoeConfig
 
 from vexact.batch_invariant_ops import set_batch_invariant_mode
-from vexact.models.fused_projections import GATE_UP, QKV, fuse_projections
+from vexact.models.fused_projections import GATE_UP, QKV, fuse_projections, register_fused_qwen3_attention
 from vexact.models.qwen3.modeling_qwen3 import apply_qwen3_patches
 from vexact.models.qwen3_moe.modeling_qwen3_moe import apply_qwen3_moe_patches
 
@@ -115,3 +115,17 @@ def test_declared_groups_and_unfused_model_uses_hf_forward(kind):
     ids = torch.randint(0, 1024, (1, 32), device="cuda")
     with torch.no_grad(), set_batch_invariant_mode(True):
         assert model(input_ids=ids).logits.isfinite().all()
+
+
+def test_registering_a_different_forward_raises():
+    """A class whose forward is not the body fused_projections reproduces must be refused, not patched:
+    Olmo3 and Gemma3 also have q/k norms but apply them to the un-reshaped projections."""
+    from transformers.models.llama.modeling_llama import LlamaAttention
+    from transformers.models.olmo3.modeling_olmo3 import Olmo3Attention
+
+    for cls in (LlamaAttention, Olmo3Attention):
+        before = cls.forward
+        with pytest.raises(RuntimeError, match="does not match the body"):
+            register_fused_qwen3_attention(cls)
+        assert cls.forward is before
+        assert not hasattr(cls, "_vexact_fuse_groups")

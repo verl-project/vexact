@@ -17,7 +17,7 @@ import logging
 
 from transformers.models.qwen3.modeling_qwen3 import Qwen3Attention, Qwen3MLP
 
-from vexact.models.fused_projections import register_fused_attention, register_fused_mlp
+from vexact.models.fused_projections import register_fused_gated_mlp, register_fused_qwen3_attention
 
 
 logger = logging.getLogger(__name__)
@@ -31,8 +31,8 @@ def apply_qwen3_patches() -> None:
     if _PATCHED:
         return
 
-    register_fused_attention(Qwen3Attention)  # q_proj, k_proj, v_proj
-    register_fused_mlp(Qwen3MLP)  # gate_proj, up_proj
+    register_fused_qwen3_attention(Qwen3Attention)  # q_proj, k_proj, v_proj
+    register_fused_gated_mlp(Qwen3MLP)  # gate_proj, up_proj
 
     logger.info("Applied Qwen3 monkey patches.")
     _PATCHED = True

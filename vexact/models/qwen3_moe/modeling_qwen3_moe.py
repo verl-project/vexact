@@ -35,7 +35,7 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import (
     Qwen3MoeSparseMoeBlock,
 )
 
-from vexact.models.fused_projections import register_fused_attention, register_fused_mlp
+from vexact.models.fused_projections import register_fused_gated_mlp, register_fused_qwen3_attention
 
 
 logger = logging.getLogger(__name__)
@@ -304,8 +304,8 @@ def apply_qwen3_moe_patches() -> None:
 
     # Projections vexact may fuse for inference (see fused_projections). The experts already hold merged
     # gate/up weights, so only the dense MLP of mlp_only_layers declares that group.
-    register_fused_attention(Qwen3MoeAttention)  # q_proj, k_proj, v_proj
-    register_fused_mlp(Qwen3MoeMLP)  # gate_proj, up_proj
+    register_fused_qwen3_attention(Qwen3MoeAttention)  # q_proj, k_proj, v_proj
+    register_fused_gated_mlp(Qwen3MoeMLP)  # gate_proj, up_proj
 
     logger.info("Applied Qwen3-MoE monkey patches.")
     _PATCHED = True

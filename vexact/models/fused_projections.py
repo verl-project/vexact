@@ -21,10 +21,17 @@ aligned (tests/test_fused_projections.py).
 
 A model declares what may be fused once, next to its other patches:
 
-    register_fused_attention(Qwen3Attention)   # ("q_proj", "k_proj", "v_proj")
-    register_fused_mlp(Qwen3MLP)               # ("gate_proj", "up_proj")
+    register_fused_qwen3_attention(Qwen3Attention)   # ("q_proj", "k_proj", "v_proj")
+    register_fused_gated_mlp(Qwen3MLP)               # ("gate_proj", "up_proj")
 
 That records the group on the class (``_vexact_fuse_groups``) and routes its forward through the fused path.
+Each register function reproduces one upstream forward, so it only fits classes whose forward is that one:
+``register_fused_gated_mlp`` fits the ``down_proj(act_fn(gate_proj(x)) * up_proj(x))`` body shared by Qwen3,
+Qwen3-MoE, Llama, Qwen2, Qwen2-MoE, Mistral, Olmo3, DeepSeek-V3, Qwen3-Next and Gemma3, while
+``register_fused_qwen3_attention`` fits only Qwen3 and Qwen3-MoE. Olmo3, Gemma3 and Qwen3-Next also have
+q/k norms but apply them differently, so registering them there would change results, not raise. Each
+registration therefore checks the class's forward against the body it reproduces and raises if upstream
+changed it, rather than silently running a stale copy.
 ``fuse_projections(model)`` then walks the modules of one model, allocates a weight per declared group and
 turns the separate weights into views of it, so parameter names and shapes are unchanged and loading and
 weight syncs, which copy into each parameter, fill the fused weight in place.
@@ -34,6 +41,9 @@ runs the model's own forward, so a model whose forward changes upstream, or one 
 working unchanged.
 """
 
+import hashlib
+import inspect
+import re
 import sys
 
 import torch
@@ -43,6 +53,17 @@ from torch import nn
 
 QKV = ("q_proj", "k_proj", "v_proj")
 GATE_UP = ("gate_proj", "up_proj")
+
+# Fingerprints of the transformers forwards the fused paths below reproduce (transformers 5.16.1:
+# Qwen3Attention / Qwen3MoeAttention share one body, Qwen3MLP / Qwen3MoeMLP the other). A mismatch means
+# upstream changed the forward and the copy here has to be re-checked against it.
+_QWEN3_ATTENTION_FORWARD = "55ed6e460ce288d0"
+_GATED_MLP_FORWARD = "4cd949b84db8e002"
+
+
+def _forward_fingerprint(func) -> str:
+    source = re.sub(r"#.*", "", inspect.getsource(func))
+    return hashlib.sha256(re.sub(r"\s+", " ", source).strip().encode()).hexdigest()[:16]
 
 
 def _fuse_group(module: nn.Module, names: tuple[str, ...]) -> None:
@@ -141,20 +162,28 @@ def _make_mlp_forward(original):
     return forward
 
 
-def _register(cls: type, names: tuple[str, ...], make_forward) -> None:
+def _register(cls: type, names: tuple[str, ...], make_forward, expected: str) -> None:
+    if not getattr(cls.forward, "_vexact_fused_projections", False):
+        found = _forward_fingerprint(cls.forward)
+        if found != expected:
+            raise RuntimeError(
+                f"{cls.__module__}.{cls.__qualname__}.forward does not match the body "
+                f"vexact/models/fused_projections.py reproduces (expected {expected}, found {found}). "
+                "Re-check that copy against the current forward before registering this class."
+            )
+        cls.forward = make_forward(cls.forward)
     declared = tuple(getattr(cls, "_vexact_fuse_groups", ()))
     if names not in declared:
         cls._vexact_fuse_groups = declared + (names,)
-    if not getattr(cls.forward, "_vexact_fused_projections", False):
-        cls.forward = make_forward(cls.forward)
 
 
-def register_fused_attention(cls: type, names: tuple[str, ...] = QKV) -> None:
-    """Declare ``names`` fusable on an attention class whose forward matches HF Qwen3's. Idempotent."""
-    _register(cls, names, _make_attention_forward)
+def register_fused_qwen3_attention(cls: type, names: tuple[str, ...] = QKV) -> None:
+    """Declare ``names`` fusable on a class whose forward is HF Qwen3Attention's (per-head q/k norms over the
+    reshaped projections, ``sliding_window`` passed on): Qwen3 and Qwen3-MoE. Idempotent."""
+    _register(cls, names, _make_attention_forward, _QWEN3_ATTENTION_FORWARD)
 
 
-def register_fused_mlp(cls: type, names: tuple[str, ...] = GATE_UP) -> None:
-    """Declare ``names`` fusable on a gated-MLP class whose forward is ``down_proj(act(gate) * up)``.
-    Idempotent."""
-    _register(cls, names, _make_mlp_forward)
+def register_fused_gated_mlp(cls: type, names: tuple[str, ...] = GATE_UP) -> None:
+    """Declare ``names`` fusable on a class whose forward is ``down_proj(act_fn(gate_proj(x)) * up_proj(x))``,
+    which many HF models share verbatim. Idempotent."""
+    _register(cls, names, _make_mlp_forward, _GATED_MLP_FORWARD)
