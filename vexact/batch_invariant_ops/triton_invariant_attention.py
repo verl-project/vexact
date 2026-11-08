@@ -844,10 +844,13 @@ class _PagedFlashAttentionVarlen(torch.autograd.Function):
 
         # The sequences with one query token (a decode step, or the decodes of a mixed batch) go to a kernel
         # that reads each KV head once for all of its query heads and launches only programs that have work;
-        # the general kernel below skips them. The tile keeps the general kernel's height so tl.dot emits the
-        # same MMA instruction over the same head_dim order; a shorter tile is faster but changes the bits.
+        # the general kernel below skips them.
         if seqused_k.numel() > 0:
-            block_h = block_m
+            # A 64-row tile is about 1.5x faster than the general kernel's 128-row one and still reduces in
+            # the same order, so the bits do not change. num_warps is part of that: the same tile with 2 warps
+            # does not match, because the layout changes how the KV axis is summed, and 128 rows with 2 warps
+            # does not either. MLA's tile is 32 rows already, so keep it.
+            block_h = 64 if block_m == 128 else block_m
             _paged_attn_decode_kernel[(seqused_k.numel(), k.shape[2])](
                 q,
                 k,
