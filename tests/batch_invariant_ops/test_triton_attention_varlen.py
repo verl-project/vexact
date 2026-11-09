@@ -596,3 +596,51 @@ def test_triton_flash_attention_forward_wrapper_shape():
 
     out, _ = flash_attention_forward(MockModule(), q, None, None, attention_mask=None, scaling=head_dim**-0.5)
     assert out.shape == (2, q_heads, head_dim)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Paged attention requires CUDA")
+@pytest.mark.parametrize("num_heads, num_kv_heads", [(32, 8), (16, 16), (40, 8)])
+@pytest.mark.parametrize("page_size", [16, 256])
+def test_paged_decode_matches_prefill_last_token(num_heads, num_kv_heads, page_size):
+    """A sequence's last token takes the decode kernel when it is generated one token at a time and the
+    general kernel when the whole sequence is prefilled. Training does the latter, so the two must agree bit
+    for bit, whatever the query/KV head ratio or page size. Each sequence's bits must also not depend on the
+    rest of the batch."""
+    torch.manual_seed(num_heads + page_size)
+    head_dim = 128
+    kv_lens = [17, 129, 384]
+    q_seqs = [torch.randn(n, num_heads, head_dim, device="cuda", dtype=torch.bfloat16) for n in kv_lens]
+    k_seqs = [torch.randn(n, num_kv_heads, head_dim, device="cuda", dtype=torch.bfloat16) for n in kv_lens]
+    v_seqs = [torch.randn(n, num_kv_heads, head_dim, device="cuda", dtype=torch.bfloat16) for n in kv_lens]
+
+    prefill = _run_paged(q_seqs, k_seqs, v_seqs, page_size)
+    decode = _run_paged([q[-1:] for q in q_seqs], k_seqs, v_seqs, page_size)
+    offset = 0
+    for i, q in enumerate(q_seqs):
+        last = offset + q.shape[0] - 1
+        assert torch.equal(prefill[last].view(torch.int16), decode[i].view(torch.int16)), f"sequence {i}"
+        offset += q.shape[0]
+
+    alone = _run_paged([q_seqs[1][-1:]], [k_seqs[1]], [v_seqs[1]], page_size)
+    assert torch.equal(alone[0].view(torch.int16), decode[1].view(torch.int16))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Paged attention requires CUDA")
+@pytest.mark.parametrize("num_heads, num_kv_heads", [(32, 8), (40, 8)])
+def test_decodes_of_a_mixed_batch_match_their_own_prefill(num_heads, num_kv_heads):
+    """A step that mixes a prefill chunk with decodes sends each sequence to a different kernel; both must
+    still agree with what the sequence gets on its own."""
+    torch.manual_seed(num_heads)
+    head_dim, page_size = 128, 256
+    kv_lens = [256, 300, 311]
+    q_seqs = [torch.randn(n, num_heads, head_dim, device="cuda", dtype=torch.bfloat16) for n in kv_lens]
+    k_seqs = [torch.randn(n, num_kv_heads, head_dim, device="cuda", dtype=torch.bfloat16) for n in kv_lens]
+    v_seqs = [torch.randn(n, num_kv_heads, head_dim, device="cuda", dtype=torch.bfloat16) for n in kv_lens]
+
+    # sequence 0 prefills all of its tokens, sequences 1 and 2 decode one token each
+    mixed = _run_paged([q_seqs[0], q_seqs[1][-1:], q_seqs[2][-1:]], k_seqs, v_seqs, page_size)
+    prefill_only = _run_paged(q_seqs[:1], k_seqs[:1], v_seqs[:1], page_size)
+    assert torch.equal(mixed[: kv_lens[0]].view(torch.int16), prefill_only.view(torch.int16))
+    for i in (1, 2):
+        full = _run_paged([q_seqs[i]], [k_seqs[i]], [v_seqs[i]], page_size)
+        assert torch.equal(mixed[kv_lens[0] + i - 1].view(torch.int16), full[-1].view(torch.int16))
