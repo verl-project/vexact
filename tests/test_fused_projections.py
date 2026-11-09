@@ -21,6 +21,7 @@ import torch
 from transformers import AutoModelForCausalLM, Qwen3Config, Qwen3MoeConfig
 
 from vexact.batch_invariant_ops import set_batch_invariant_mode
+from vexact.models import fused_projections
 from vexact.models.fused_projections import GATE_UP, QKV, fuse_projections, register_fused_qwen3_attention
 from vexact.models.qwen3.modeling_qwen3 import apply_qwen3_patches
 from vexact.models.qwen3_moe.modeling_qwen3_moe import apply_qwen3_moe_patches
@@ -92,6 +93,33 @@ def test_weight_sync_writes_into_fused_weight(kind):
     assert torch.equal(weight[: attn.q_proj.out_features], new["model.layers.0.self_attn.q_proj.weight"])
     ids = torch.randint(0, 1024, (1, 64), device="cuda")
     assert torch.equal(_logits(fused, ids).view(torch.int16), _logits(model, ids).view(torch.int16))
+
+
+def _swiglu_calls(model, ids, monkeypatch):
+    calls = []
+    real = fused_projections.swiglu
+    monkeypatch.setattr(fused_projections, "swiglu", lambda fc1: calls.append(fc1.shape) or real(fc1))
+    _logits(model, ids)
+    return calls
+
+
+def test_silu_mlps_take_the_fused_swiglu_kernel(monkeypatch):
+    """Every dense SiLU MLP must actually reach the kernel: the activation transformers builds for
+    hidden_act "silu" is its own SiLUActivation, not nn.SiLU, and a guard that misses it is dead code."""
+    _, fused = _models("qwen3", bias=False)
+    ids = torch.randint(0, 1024, (1, 48), device="cuda")
+    assert len(_swiglu_calls(fused, ids, monkeypatch)) == 2  # one per layer
+
+
+def test_non_silu_activation_keeps_the_eager_expression(monkeypatch):
+    """The dense-SwiGLU kernel only replays SiLU; another activation must still go through act_fn."""
+    model, fused = _models("qwen3", bias=False)
+    for m in (model, fused):
+        for layer in m.model.layers:
+            layer.mlp.act_fn = torch.nn.GELU()
+    ids = torch.randint(0, 1024, (1, 48), device="cuda")
+    assert torch.equal(_logits(fused, ids).view(torch.int16), _logits(model, ids).view(torch.int16))
+    assert _swiglu_calls(fused, ids, monkeypatch) == []
 
 
 def test_grad_enabled_calls_use_separate_projections():

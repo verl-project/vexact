@@ -30,6 +30,7 @@ from veomni.ops.kernels.moe.group_gemm import group_gemm_fused_moe_forward  # no
 from vexact.batch_invariant_ops.fused_moe_rollout import (  # noqa: E402
     apply_rollout_fused_moe,
     expert_counting_sort,
+    swiglu,
     swiglu_gate,
 )
 from vexact.batch_invariant_ops.moe_group_gemm_tuning import apply_moe_group_gemm_tuning  # noqa: E402
@@ -56,6 +57,12 @@ def test_swiglu_gate_replays_eager_roundings():
     ref = torch.ops.aten.silu(gate) * up * weights[order][:, None]
     out = swiglu_gate(torch.cat([gate, up], dim=1), weights, order)
     same = (_bits(out) == _bits(ref)) | (torch.isnan(out) & torch.isnan(ref))
+    assert bool(same.all())
+
+    # Dense MLPs use the same kernel without the routing weight: it must give aten's silu-times-up bits.
+    dense_ref = torch.ops.aten.silu(gate) * up
+    dense = swiglu(torch.cat([gate, up], dim=1))
+    same = (_bits(dense) == _bits(dense_ref)) | (torch.isnan(dense) & torch.isnan(dense_ref))
     assert bool(same.all())
 
 

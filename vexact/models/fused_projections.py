@@ -36,6 +36,11 @@ changed it, rather than silently running a stale copy.
 turns the separate weights into views of it, so parameter names and shapes are unchanged and loading and
 weight syncs, which copy into each parameter, fill the fused weight in place.
 
+A fused gate/up GEMM also hands its output to the dense-SwiGLU kernel whole (``swiglu``, the fused-MoE
+kernel without the routing weight), which replaces ``act_fn(gate) * up`` -- two strided reads of that
+output, a silu and a multiply -- with one pass, for a bf16 MLP whose activation is SiLU. The kernel replays
+aten's roundings, so the bits are eager's; any other dtype or activation keeps the eager expression.
+
 The fused path is used only for a module that was actually fused and only with autograd off; anything else
 runs the model's own forward, so a model whose forward changes upstream, or one that is never fused, keeps
 working unchanged.
@@ -49,10 +54,17 @@ import sys
 import torch
 import torch.nn.functional as F
 from torch import nn
+from transformers.activations import SiLUActivation
+
+from vexact.batch_invariant_ops.fused_moe_rollout import swiglu
 
 
 QKV = ("q_proj", "k_proj", "v_proj")
 GATE_UP = ("gate_proj", "up_proj")
+
+# What the dense-SwiGLU kernel replays. transformers maps hidden_act "silu" to its own SiLUActivation
+# (``nn.functional.silu``, so aten's bits) and "swish" to nn.SiLU; neither is a subclass of the other.
+_SILU = (nn.SiLU, SiLUActivation)
 
 # Fingerprints of the transformers forwards the fused paths below reproduce (transformers 5.16.1:
 # Qwen3Attention / Qwen3MoeAttention share one body, Qwen3MLP / Qwen3MoeMLP the other). A mismatch means
@@ -99,15 +111,17 @@ def fuse_projections(model: nn.Module) -> int:
     return fused
 
 
-def fused_projection(module: nn.Module, names: tuple[str, ...], x: torch.Tensor) -> tuple[torch.Tensor, ...] | None:
-    """One GEMM for ``names``, split back per projection, or None when the fused path does not apply."""
+def fused_projection(module: nn.Module, names: tuple[str, ...], x: torch.Tensor, split: bool = True):
+    """One GEMM for ``names``, split back per projection (``split=False``: the GEMM output with the
+    projections' columns still concatenated), or None when the fused path does not apply."""
     if torch.is_grad_enabled():
         return None
     entry = getattr(module, "_vexact_fused", {}).get(names)
     if entry is None:
         return None
     weight, bias, sizes = entry
-    return F.linear(x, weight, bias).split(sizes, dim=-1)
+    out = F.linear(x, weight, bias)
+    return out.split(sizes, dim=-1) if split else out
 
 
 def _make_attention_forward(original):
@@ -152,10 +166,15 @@ def _make_attention_forward(original):
 
 def _make_mlp_forward(original):
     def forward(self, x):
-        projected = fused_projection(self, GATE_UP, x)
-        if projected is None:
+        fc1 = fused_projection(self, GATE_UP, x, split=False)
+        if fc1 is None:
             return original(self, x)
-        gate, up = projected
+        if fc1.dtype == torch.bfloat16 and isinstance(self.act_fn, _SILU):
+            # One pass over the fused GEMM output instead of silu, a multiply and two strided reads of it.
+            # The kernel replays aten's bf16 roundings, so the bits are eager's.
+            return self.down_proj(swiglu(fc1))
+        # gate_proj and up_proj both project to intermediate_size in every class registered here.
+        gate, up = fc1.split(fc1.shape[-1] // 2, dim=-1)
         return self.down_proj(self.act_fn(gate) * up)
 
     forward._vexact_fused_projections = True

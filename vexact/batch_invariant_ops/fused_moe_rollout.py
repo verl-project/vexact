@@ -44,33 +44,54 @@ def _swiglu_gate_kernel(
     out_ptr,  # [rows, INTER] bf16
     INTER: tl.constexpr,
     BLOCK_I: tl.constexpr,
+    HAS_WEIGHT: tl.constexpr,  # False (dense MLP): plain silu(gate) * up, no routing weight
 ):
     row = tl.program_id(0).to(tl.int64)
     cols = tl.program_id(1) * BLOCK_I + tl.arange(0, BLOCK_I)
     mask = cols < INTER
     gate = tl.load(fc1_ptr + row * 2 * INTER + cols, mask=mask, other=0.0).to(tl.float32)
     up = tl.load(fc1_ptr + row * 2 * INTER + INTER + cols, mask=mask, other=0.0).to(tl.float32)
-    w = tl.load(gate_w_ptr + tl.load(order_ptr + row)).to(tl.float32)
     # aten::silu on bf16: fp32 x / (1 + expf(-x)), rounded to bf16.
     act = tl.math.div_rn(gate, 1.0 + libdevice.exp(-gate)).to(tl.bfloat16).to(tl.float32)
     # bf16 * bf16 in aten: fp32 product rounded to bf16, twice.
     act = (act * up).to(tl.bfloat16).to(tl.float32)
-    tl.store(out_ptr + row * INTER + cols, (act * w).to(tl.bfloat16), mask=mask)
+    if HAS_WEIGHT:
+        w = tl.load(gate_w_ptr + tl.load(order_ptr + row)).to(tl.float32)
+        act = act * w
+    tl.store(out_ptr + row * INTER + cols, act.to(tl.bfloat16), mask=mask)
+
+
+def _launch_swiglu(fc1_output: torch.Tensor, gate_weights_flat, sorted_order, has_weight: bool):
+    inter = fc1_output.shape[-1] // 2
+    out = torch.empty((*fc1_output.shape[:-1], inter), dtype=fc1_output.dtype, device=fc1_output.device)
+    rows = out.numel() // inter
+    if rows == 0:
+        return out
+    block_i = min(1024, triton.next_power_of_2(inter))
+    _swiglu_gate_kernel[(rows, triton.cdiv(inter, block_i))](
+        fc1_output,
+        gate_weights_flat,
+        sorted_order,
+        out,
+        INTER=inter,
+        BLOCK_I=block_i,
+        HAS_WEIGHT=has_weight,
+        num_warps=4,
+    )
+    return out
 
 
 def swiglu_gate(fc1_output: torch.Tensor, gate_weights_flat: torch.Tensor, sorted_order: torch.Tensor):
     """``(silu(fc1[:, :I]) * fc1[:, I:]) * gate_weights_flat[sorted_order][:, None]`` with VeOmni's
     exact bf16 rounding sequence, in one pass."""
-    rows, two_i = fc1_output.shape
-    inter = two_i // 2
-    out = torch.empty((rows, inter), dtype=fc1_output.dtype, device=fc1_output.device)
-    if rows == 0:
-        return out
-    block_i = min(1024, triton.next_power_of_2(inter))
-    _swiglu_gate_kernel[(rows, triton.cdiv(inter, block_i))](
-        fc1_output, gate_weights_flat, sorted_order, out, INTER=inter, BLOCK_I=block_i, num_warps=4
-    )
-    return out
+    return _launch_swiglu(fc1_output, gate_weights_flat, sorted_order, has_weight=True)
+
+
+def swiglu(fc1_output: torch.Tensor):
+    """``silu(fc1[..., :I]) * fc1[..., I:]`` for a dense gated MLP, in one pass over a fused gate/up GEMM
+    output. bf16 only: it is the kernel above without the routing weight, so it replays aten's roundings
+    (silu to bf16, product to bf16) and gives eager's bits."""
+    return _launch_swiglu(fc1_output, None, None, has_weight=False)
 
 
 @triton.jit

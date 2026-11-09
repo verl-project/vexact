@@ -214,6 +214,16 @@ tile and any split-K per call:
     activations once per group. The batch-invariant matmul reduces each output column over K in the same
     order whatever N is, so the bits are unchanged and training, which keeps separate projections, stays
     aligned. +2.4% end to end on top of the tile change (+4.9% over the previous stack).
+- **Dense SwiGLU in one pass.** A dense MLP read the fused gate/up GEMM output back twice, as two
+    strided halves, to run `silu` and a multiply: 4 of the 5 elementwise kernels per layer, against
+    vLLM's single fused `triton_poi_fused_mul_silu_slice`. The inference fused-MoE SwiGLU kernel is
+    the same arithmetic plus a routing-weight multiply, so it takes the whole GEMM output with that
+    multiply switched off at compile time; it already replays aten's two bf16 roundings, so the bits
+    are eager's. Only a bf16 MLP whose activation is SiLU uses it. +3.8% (GSM8K) and +3.0% (512
+    requests × 512 tokens) end to end on Qwen3-8B. Note that `hidden_act: "silu"` builds
+    transformers' own `SiLUActivation`, which is not an `nn.SiLU` subclass: a guard that checks only
+    `nn.SiLU` leaves the kernel unreachable, and no bitwise test can see the difference, so a test
+    asserts the kernel is reached once per dense layer.
 
 ### End to end vs vLLM
 
@@ -222,15 +232,16 @@ vexact with async scheduling). Output tokens/s:
 
 | model / workload       | vexact | vLLM batch-invariant | vLLM default |
 | ---------------------- | -----: | -------------------: | -----------: |
-| Qwen3-8B GSM8K         | 13,976 |               13,892 |       16,690 |
-| Qwen3-8B ShareGPT      |  8,490 |                6,910 |       11,122 |
+| Qwen3-8B GSM8K         | 14,483 |               13,892 |       16,690 |
+| Qwen3-8B ShareGPT      |  8,738 |                6,910 |       11,122 |
 | Qwen3-30B-A3B GSM8K    |  5,807 |                6,080 |        7,795 |
 | Qwen3-30B-A3B ShareGPT |  4,497 |                4,425 |        5,806 |
 
 vLLM's batch-invariant mode makes vLLM consistent with itself, not with a training engine. vexact is
-at 0.96–1.23× of it and 0.74–0.84× of vLLM's default mode. The 4-stage tile and the fused projections
-are worth +4.9% on Qwen3-8B GSM8K but only +0.4% on Qwen3-30B-A3B GSM8K, where every layer is MoE: its
-experts already hold merged gate/up weights, so only q/k/v is fused there.
+at 0.96–1.27× of it and 0.74–0.87× of vLLM's default mode. The 4-stage tile, the fused projections and
+the fused dense SwiGLU are worth +8.7% on Qwen3-8B GSM8K but only +0.4% on Qwen3-30B-A3B GSM8K, where
+every layer is MoE: its experts already hold merged gate/up weights and run the SwiGLU kernel already,
+so only q/k/v is fused there.
 
 Per decode step on Qwen3-8B at 512 sequences, what is left against vLLM's default mode is attention
 (vLLM's FA3 fork picks a 64-row query tile with one consumer warpgroup when the query rows per KV head
