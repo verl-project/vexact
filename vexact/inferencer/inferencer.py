@@ -123,6 +123,7 @@ class Inferencer:
                 forward_kwargs=self.forward_kwargs,
                 input_buffers=self.input_buffers,
                 logits_for_last_tokens_only=self.logits_for_last_tokens_only,
+                capture_decode_graphs=config.model.capture_decode_graphs,
             )
             self._cudagraph_mgr.capture_graphs()
         else:

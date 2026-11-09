@@ -20,16 +20,18 @@ import pytest
 from vexact.inferencer.cudagraph_utils import BatchExecutionDescriptor, CudaGraphManager
 
 
-def _manager(max_num_batched_tokens: int, max_num_seqs: int) -> CudaGraphManager:
+def _manager(max_num_batched_tokens: int, max_num_seqs: int, decode_graphs: bool = True) -> CudaGraphManager:
     manager = CudaGraphManager.__new__(CudaGraphManager)
     sizes = CudaGraphManager.build_capture_sizes(max_num_batched_tokens)
     manager.capture_sizes = sizes
     manager._descriptors = [
         BatchExecutionDescriptor(num_tokens=s, num_seqs=min(s, max_num_seqs), max_seqlen_q=s) for s in sizes
     ]
-    manager._decode_descriptors = [
-        BatchExecutionDescriptor(num_tokens=s, num_seqs=s, max_seqlen_q=1) for s in sizes if 1 < s <= max_num_seqs
-    ]
+    manager._decode_descriptors = (
+        [BatchExecutionDescriptor(num_tokens=s, num_seqs=s, max_seqlen_q=1) for s in sizes if 1 < s <= max_num_seqs]
+        if decode_graphs
+        else []
+    )
     return manager
 
 
@@ -61,3 +63,15 @@ def test_oversized_batches_have_no_graph():
     manager = _manager(1024, 128)
     assert manager.dispatch(num_seqs=129, total_tokens=129) is None
     assert manager.dispatch(num_seqs=4, total_tokens=2048) is None
+
+
+@pytest.mark.parametrize("max_num_batched_tokens, max_num_seqs", [(4096, 512), (2048, 256), (8, 8)])
+def test_without_decode_graphs_every_batch_still_gets_a_sound_graph(max_num_batched_tokens, max_num_seqs):
+    """With capture_decode_graphs off there are no decode descriptors, so a decode step takes a general
+    graph: slower, but its baked max_seqlen_q must still bound the batch."""
+    manager = _manager(max_num_batched_tokens, max_num_seqs, decode_graphs=False)
+    for num_seqs in range(1, max_num_seqs + 1):
+        desc = manager.dispatch(num_seqs=num_seqs, total_tokens=num_seqs)
+        assert desc is not None and desc in manager._descriptors
+        assert desc.max_seqlen_q >= 1
+        assert desc.num_seqs >= num_seqs and desc.num_tokens >= num_seqs

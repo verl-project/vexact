@@ -69,6 +69,7 @@ class CudaGraphManager:
         pool: Any | None = None,
         forward_kwargs: dict[str, Any] | None = None,
         logits_for_last_tokens_only: bool = False,
+        capture_decode_graphs: bool = False,
     ):
         self.model = model
         # When set, the model gets `logits_to_keep` from the static last_token_idx buffer, which the
@@ -93,11 +94,20 @@ class CudaGraphManager:
             for capture_size in self.capture_sizes
         ]
         # One token per sequence. Size 1 is already covered by the general descriptor of the same shape.
-        self._decode_descriptors = [
-            BatchExecutionDescriptor(num_tokens=size, num_seqs=size, max_seqlen_q=1)
-            for size in self.capture_sizes
-            if 1 < size <= self.input_buffers.max_num_seqs
-        ]
+        # These differ from the general descriptors only by the baked max_seqlen_q and capture the same
+        # shapes, so they share the capture pool and cost far less memory than their count suggests
+        # (13 -> 22 graphs on Qwen3-8B, no rise in reserved memory). They pay off only with an attention
+        # kernel that acts on max_seqlen_q == 1: worth +4.9% end to end with vLLM's FA3 build and nothing
+        # at all with the upstream wheel, so `capture_decode_graphs` is off unless asked for.
+        self._decode_descriptors = (
+            [
+                BatchExecutionDescriptor(num_tokens=size, num_seqs=size, max_seqlen_q=1)
+                for size in self.capture_sizes
+                if 1 < size <= self.input_buffers.max_num_seqs
+            ]
+            if capture_decode_graphs
+            else []
+        )
 
     @staticmethod
     def build_capture_sizes(max_size: int | None) -> list[int]:

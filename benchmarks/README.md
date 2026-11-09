@@ -227,12 +227,25 @@ tile and any split-K per call:
     order whatever N is, so the bits are unchanged and training, which keeps separate projections, stays
     aligned. +2.4% end to end on top of the tile change (+4.9% over the previous stack).
 
-- **vLLM's FA3 decode tile.** With the `vllm` extra installed, paged attention runs vLLM's FA3 build instead
-    of the upstream wheel. Its decode heuristic picks a 64-row query tile with one consumer warpgroup when the
-    query rows per KV head are at most 64, which is 1.14–1.27× faster per decode call and returns the same bits.
-    It only fires when attention is told the real query length, so pure-decode CUDA graphs are captured with
-    `max_seqlen_q = 1` (worth a further 1.08–1.15×) instead of the whole token bucket. `max_seqlen_k` may be any
-    upper bound, so it is the block table's capacity: constant, and therefore safe to bake into a graph.
+- **vLLM's FA3 decode tile, with pure-decode CUDA graphs.** With the `vllm` extra installed, paged attention
+    runs vLLM's FA3 build instead of the upstream wheel. Its decode heuristic picks a 64-row query tile with one
+    consumer warpgroup when the query rows per KV head are at most 64, which is 1.14–1.27× faster per decode call
+    and returns the same bits. The predicate is on the query length, so it only fires if attention is told the
+    real one, which a CUDA graph bakes at capture: `ModelConfig.capture_decode_graphs` (off by default) captures a
+    second graph per size for pure decode steps with `max_seqlen_q = 1` instead of the whole token bucket.
+    `max_seqlen_k` may be any upper bound, so it is the block table's capacity: constant, and safe to bake in.
+
+    Neither half is worth anything alone, which is the point of measuring the pair (Qwen3-8B GSM8K, output tok/s):
+
+    | | upstream wheel | vLLM FA3 build |
+    | ---------------- | -------------: | -------------: |
+    | general graphs   |         13,999 |         13,824 |
+    | + decode graphs  |         13,994 |     **14,679** |
+
+    The upstream wheel's decode path does not act on the query length, so the extra graphs change nothing there;
+    the vLLM build without them is 1.2% *slower* than the wheel. Enable the extra and the option together, or
+    neither. The extra graphs capture the same shapes as the general ones and share the capture pool, so they
+    cost far less memory than their count suggests (13 → 22 graphs, no rise in reserved memory).
 
 ### End to end vs vLLM
 
