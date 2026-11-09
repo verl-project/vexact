@@ -197,6 +197,12 @@ def parse_worker_args():
         help="Disable cudagraph capture/replay and force eager model forward",
     )
     parser.add_argument(
+        "--capture-decode-graphs",
+        action="store_true",
+        help="Capture a second cuda graph per size for pure decode steps: faster decode, about twice the "
+        "cuda-graph memory",
+    )
+    parser.add_argument(
         "--use-fp32-logits",
         action="store_true",
         help="Use fused linear cross entropy for logprob computation",
@@ -242,6 +248,7 @@ def main():
             model_path=args.model_path,
             attn_impl=args.attn_impl,
             enforce_eager=args.enforce_eager,
+            capture_decode_graphs=args.capture_decode_graphs,
             use_fp32_logits=args.use_fp32_logits,
         ),
         parallel=ParallelConfig(
