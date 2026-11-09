@@ -844,8 +844,17 @@ class _PagedFlashAttentionVarlen(torch.autograd.Function):
 
         # The sequences with one query token (a decode step, or the decodes of a mixed batch) go to a kernel
         # that reads each KV head once for all of its query heads and launches only programs that have work;
-        # the general kernel below skips them.
-        if seqused_k.numel() > 0:
+        # the general kernel below then skips them.
+        #
+        # Its tile is not the general kernel's, and whether two tile heights reduce the KV axis in the same
+        # order is a property of the architecture's dot layout: the bits agree on SM90 and not on SM89, where
+        # 16% of the outputs change (tests/batch_invariant_ops/test_triton_attention_varlen.py asserts the
+        # agreement). Only SM90 is verified, so only SM90 takes this path; anywhere else every sequence goes
+        # to the general kernel, exactly as before this kernel existed.
+        from vexact.utils.device import DEVICE_MAJOR  # at call time: reading it needs a CUDA device
+
+        decode_kernel = DEVICE_MAJOR == 9
+        if decode_kernel and seqused_k.numel() > 0:
             # A 64-row tile is about 1.5x faster than the general kernel's 128-row one and still reduces in
             # the same order, so the bits do not change. num_warps is part of that: the same tile with 2 warps
             # does not match, because the layout changes how the KV axis is summed, and 128 rows with 2 warps
@@ -891,7 +900,7 @@ class _PagedFlashAttentionVarlen(torch.autograd.Function):
                 num_stages=3,
             )
 
-        if max_seqlen_q == 1:
+        if decode_kernel and max_seqlen_q == 1:
             return o  # every sequence had one query token, so the decode kernel did all of the work
 
         # One program per query block of the longest query run, plus one for a run straddling a boundary.
@@ -929,7 +938,7 @@ class _PagedFlashAttentionVarlen(torch.autograd.Function):
             causal,
             BF16_OUTPUT=q.dtype == torch.bfloat16,
             FP32_OUTPUT=q.dtype == torch.float32,
-            SKIP_DECODE=True,
+            SKIP_DECODE=decode_kernel,
             BLOCK_M=block_m,
             BLOCK_N=block_n,
             BLOCK_D=block_d,
